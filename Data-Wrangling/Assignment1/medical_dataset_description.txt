@@ -1,0 +1,33 @@
+Data Set Purpose:
+
+This data set contains information about individuals who have a "medical event",
+where a "medical event" means conducting a medical examination. In addition
+to capturing certain medical information, the dataset contains some personal and 
+demographic information of the individuals. Only the most recent "medical event" for an 
+individual is captured.
+
+Attribute Descriptions:
+rec_id                The record identifier
+ssn:			      The social security number of the individual (Unique).
+first_name:		      The first given name of the individual.
+middle_name:          The second given name of the individual.
+last_name:		      The surname or family name of the individual.
+gender:			      The person's gender (m/f).
+age_at_consultation   The current age of a person at the "medical event". 
+birth_date:		      The person's date of birth.
+medicare_number:      The medicare number of the person
+street_address:	      The first part of the address containing street number/street name.
+suburb:			      The suburb of the address.
+postcode:		      The postcode of the address.
+state:			      The state of the address.
+phone:			      The person's home phone number.
+email:			      The person's personal e-mail address.
+marital_status:       The person's current marriage status.
+height:               The person's height in cm.
+weight:               The person's weight in kg.
+bmi:				  The person's bmi in kg/m^2.
+blood_pressure:       The person's blood pressure value in mmHg.
+cholesterol_level:    The person's cholesterol level value in mg/dL.
+smoking_status:		  Whether the person currently smokes or not.
+clinical_notes:       Any clinically important notes.
+consultation_timestamp: The date of the "medical event".
