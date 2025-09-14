@@ -1,0 +1,31 @@
+Data Set Purpose:
+
+This data set contains information about individuals who have an "employment event",
+where an "employment event" means either starting a new job or retiring. In addition
+to capturing some personal and demographic information, the data set contains details 
+of the individual's educational background and work experience history. Only the most
+recent "employment event" for an individual is captured.
+
+Attribute Descriptions:
+rec_id                  The record identifier
+ssn:			The social security number of the individual (Unique).
+first_name:		The first given name of the individual.
+middle_name:		The second given name of the individual.
+last_name:		The surname or family name of the individual.
+gender:			The person's gender (m/f).
+current_age             The current age of a person at the "employment event". 
+birth_date:		The person's date of birth.
+street_address:		The first part of the address containing street number/street name.
+suburb:			The suburb of the address.
+postcode:		The postcode of the address.
+state:			The state of the address.
+phone:			The individual's home phone number.
+email:			The individual's personal e-mail address.
+education:		The highest level of education obtained by the individual.
+occupation:		The industry or job category at the "employment event".
+salary:			The salary at the "employment event".
+credit_card_number:	The credit card number of the individual.
+years_of_experience:	The number of years the individual worked in the field (or their former field for retired individual's).
+employment_timestamp:	The date of the "employment event".
+
+
