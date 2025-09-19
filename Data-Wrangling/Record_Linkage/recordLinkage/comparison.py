@@ -270,8 +270,8 @@ def bag_dist_sim_comp(val1, val2):
 	bag_sim = 0.0	# Replace with your code
 	s1 = bag(val1)
 	s2 = bag(val2)
-	intersection_size = sum((s1 & s2).values())
-	bag_sim = intersection_size / max(len(val1), len(val2))
+    difference_size = max(len(s1.keys() - s2.keys()), len(s2.keys() - s1.keys()))
+	bag_sim = 1.0 - difference_size / max(len(val1), len(val2))
 	
 	# ************ End of your bag distance code ********************************
 
