@@ -76,11 +76,13 @@ def thresholdClassify(sim_vec_dict, sim_thres):
   #
   for (rec_id_tuple, sim_vec) in sim_vec_dict.items():
 
-    # ********* Implement threshold based classification **********************
+    sim_sum = float(sum(sim_vec))  # Sum all attribute similarities
+    avr_sim = sim_sum / len(sim_vec)
 
-    pass  # Add your code here 
-
-    # ************ End of your code *******************************************
+    if avr_sim >= sim_thres:  # Average similarity is high enough
+      class_match_set.add(rec_id_tuple)
+    else:
+      class_nonmatch_set.add(rec_id_tuple)
 
   print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
@@ -117,11 +119,21 @@ def minThresholdClassify(sim_vec_dict, sim_thres):
   #
   for (rec_id_tuple, sim_vec) in sim_vec_dict.items():
 
-    # ********* Implement minimum threshold classification ********************
+    # Flag to check is all attribute similarities are high enough or not
+    #
+    record_pair_match = True
 
-    pass  # Add your code here 
+    # check for all the compared attributes
+    #
+    for sim in sim_vec:
+      if sim < sim_thres:  # Similarity is not enough
+        record_pair_match = False
+        break  # No need to compare more similarities, speed-up the process
 
-    # ************ End of your code *******************************************
+    if (record_pair_match):  # All similaries are high enough
+      class_match_set.add(rec_id_tuple)
+    else:
+      class_nonmatch_set.add(rec_id_tuple)
 
   print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
@@ -168,11 +180,19 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
   #
   for (rec_id_tuple, sim_vec) in sim_vec_dict.items():
 
-    # ******* Implement weighted similarity classification ********************
+    sim_sum = 0.0
 
-    pass  # Add your code here 
+    # Compute weighted sim for each attribute
+    #
+    for sim, weight in zip(sim_vec, weight_vec):
+      sim_sum += sim * weight
 
-    # ************ End of your code *******************************************
+    avr_sim = sim_sum / weight_sum  # Compute noramlised average similarity
+
+    if avr_sim >= sim_thres:  # Average similarity is high enough
+      class_match_set.add(rec_id_tuple)
+    else:
+      class_nonmatch_set.add(rec_id_tuple)
 
   print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
@@ -182,166 +202,70 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vec_dict, true_match_set):
+def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
   """A classifier method based on a supervised machine learning technique
-     (decision tree) which learns from the given similarity vectors and the
+     (random forest) which learns from the given similarity vectors and the
      true match status set provided.
 
      The approach works as follows:
-     1) Create the matrix of features (similarity vectors) and class labels 
+     1) Create the matrix of features (similarity vectors) and class labels
         (true matches and true non-matches)
-     2) Generate 3 or 5 or 7 etc. decision tree classifiers as follows:
-        2a) Sample 2/3 of all training examples -> training set
-            The remaining training examples ->     test set
-        2b) Train the decision tree classifier on the training set
-        2c) Test the accuracy of the classifier on the test set
-     3) For each record pair and its similarity vector, apply the 3 or 5
-        trained classifiers, get the majority class (match or non-match) as
-        its final class
+     2) Train a random forest classifier on the training data.
+     3) For each record pair and its similarity vector, predict its class
+        (match or non-match).
 
      Parameter Description:
-       sim_vec_dict  : Dictionary of record pairs with their identifiers as
-                       as keys and their corresponding similarity vectors as
-                       values.
-       true_mach_set : Set of true matches (record identifier pairs)
+       sim_vec_dict   : Dictionary of record pairs with their identifiers as
+                        keys and their corresponding similarity vectors as
+                        values.
+       true_match_set : Set of true matches (record identifier pairs)
+       n_estimators   : The number of trees in the forest.
   """
-
-  num_folds = 3  # Number of classifiers to create
 
   class_match_set =    set()
   class_nonmatch_set = set()
 
   try:
     import numpy
-    import sklearn.tree
-  except:
-    print('Either the "numpy" or "sklearn" modules is not installed! Aborting.')
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import train_test_split
+  except ImportError:
+    print('The "numpy" or "sklearn" modules are not installed! Aborting.')
     print('')
+    return set(), set()
 
-    return set(), set()  # Return two empty sets so program continues
-
-  import random
-
-  print('Supervised decision tree classification of %d record pairs' % \
+  print('Supervised random forest classification of %d record pairs' % \
         (len(sim_vec_dict)))
 
-  # Generate the training data sets (similarity vectors plus class labels
-  # (match or non-match)
-  #
-  num_train_rec = len(sim_vec_dict)
-  num_features =  len(list(sim_vec_dict.values())[0])
+  rec_pairs = list(sim_vec_dict.keys())
+  X = numpy.array(list(sim_vec_dict.values()))
+  y = numpy.array([1 if pair in true_match_set else 0 for pair in rec_pairs])
 
-  print('  Number of training records and features: %d / %d' % \
-        (num_train_rec, num_features))
+  # Split data into training and testing sets
+  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33,
+                                                    random_state=42)
 
-  all_train_data =  numpy.zeros([num_train_rec, num_features])
-  all_train_class = numpy.zeros(num_train_rec)
-
-  rec_pair_id_list = []
-
-  num_pos = 0
-  num_neg = 0
-
-  i = 0
-  for (rec_id1,rec_id2) in sim_vec_dict:
-    rec_pair_id_list.append((rec_id1,rec_id2))
-    sim_vec = sim_vec_dict[(rec_id1,rec_id2)]
-
-    all_train_data[:][i] = sim_vec
-
-    if (rec_id1,rec_id2) in true_match_set:
-      all_train_class[i] = 1.0
-      num_pos += 1
-    else:
-      all_train_class[i] = 0.0
-      num_neg += 1
-    i += 1
-
-  num_all = num_pos + num_neg  # All training examples
-
-  num_train_select = int(2./3 * num_all)  # Select 2/3 for training
-  num_test_select =  num_all - num_train_select
-
-  print('  Number of positive and negative training records: %d / %d' % \
-        (num_pos, num_neg))
+  print('  Number of training records: %d' % len(X_train))
+  print('  Number of testing records: %d' % len(X_test))
   print('')
 
-  class_list = []  # List of the generated classifiers
+  # Initialize and train the classifier
+  clf = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
+  clf.fit(X_train, y_train)
 
-  for c in range(num_folds):
-
-    train_index_list = random.sample(range(num_all), num_train_select)
-
-    train_data =  numpy.zeros([num_train_select, num_features])
-    train_class = numpy.zeros(num_train_select)
-    test_data =   numpy.zeros([num_test_select, num_features])
-    test_class =  numpy.zeros(num_test_select)
-
-    # Copy similarities and class labels
-    #
-    train_ind = 0
-    test_ind =  0
-
-    for i in range(num_all):
-
-      if (i in train_index_list):
-        train_data[:][train_ind] = all_train_data[:][i]
-        train_class[train_ind] =   all_train_class[i]
-        train_ind += 1
-      else:
-        test_data[:][test_ind] = all_train_data[:][i]
-        test_class[test_ind] =   all_train_class[i]
-        test_ind += 1
-
-    # Now build and train the classifier
-    #
-    decision_tree = sklearn.tree.DecisionTreeClassifier()
-    decision_tree.fit(train_data, train_class)
-
-    # Now use the trained classifier on the testing data to see how accurate
-    # it is
-    #
-    class_predict = decision_tree.predict(test_data)
-
-    num_corr =  0
-    num_wrong = 0
-
-    for i in range(len(class_predict)):
-      if (class_predict[i] == test_class[i]):
-        num_corr += 1
-      else:
-        num_wrong += 1
-
-    print('  Classifier %d gets %d correct and %d wrong' % \
-          (c, num_corr, num_wrong))
-
-    class_list.append(decision_tree)
-
-  # Now use the trained classifiers to classify all record pairs
-  #
-  num_match_class_list = [0]*num_all  # Count how often a record pair is
-                                      # classified as a match
-
-  for decision_tree in class_list:
-
-    class_predict = decision_tree.predict(all_train_data)  # Classify all pairs
-
-    for i in range(num_all):
-      num_match_class_list[i] += class_predict[i]
-
-      assert num_match_class_list[i] <= num_folds, num_match_class_list[i]
-
-  for i in range(num_all):
-    rec_id_pair = rec_pair_id_list[i]
-
-    # More '1' (match) classifications than '0' (non-match ones)
-    #
-    if (float(num_match_class_list[i]) / num_folds > 0.5):
-      class_match_set.add(rec_id_pair)
-    else:
-      class_nonmatch_set.add(rec_id_pair)
-
+  # Evaluate the classifier
+  accuracy = clf.score(X_test, y_test)
+  print('  Classifier accuracy: %.3f' % accuracy)
   print('')
+
+  # Classify all record pairs
+  predictions = clf.predict(X)
+
+  for i, pair in enumerate(rec_pairs):
+    if predictions[i] == 1:
+      class_match_set.add(pair)
+    else:
+      class_nonmatch_set.add(pair)
 
   print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
@@ -352,3 +276,5 @@ def supervisedMLClassify(sim_vec_dict, true_match_set):
 # -----------------------------------------------------------------------------
 
 # End of program.
+
+

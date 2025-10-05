@@ -191,8 +191,8 @@ start_time = time.time()
 
 # Exact matching based classification
 #
-class_match_set, class_nonmatch_set = \
-             classification.exactClassify(sim_vec_dict)
+# class_match_set, class_nonmatch_set = \
+# classification.exactClassify(sim_vec_dict)
 
 # *********** In lab 5, explore different similarity threshold values *********
 
@@ -209,25 +209,10 @@ class_match_set, class_nonmatch_set = \
 #             classification.minThresholdClassify(sim_vec_dict,
 #                                                 min_sim_threshold)
 
-# *********** In lab 6, explore different weight vectors **********************
-
-# Weighted similarity threshold based classification
-#
-#weight_vec = [1.0] * len(approx_comp_funct_list)
-
-# Lower weights for middle name and state
-#
-#weight_vec = [2.0, 1.0, 2.0, 2.0, 2.0, 1.0]
-
-#class_match_set, class_nonmatch_set = \
-#             classification.weightedSimilarityClassify(sim_vec_dict,
-#                                                       weight_vec,
-#                                                       sim_threshold)
-
 # A supervised decision tree classifier
 #
-#class_match_set, class_nonmatch_set = \
-#           classification.supervisedMLClassify(sim_vec_dict, true_match_set)
+class_match_set, class_nonmatch_set = \
+           classification.supervisedMLClassify(sim_vec_dict, true_match_set)
 
 classification_time = time.time() - start_time
 
