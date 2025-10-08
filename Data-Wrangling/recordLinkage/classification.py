@@ -8,6 +8,11 @@
 
 # =============================================================================
 
+import sys
+import cudf
+import cupy
+from cuml.ensemble import RandomForestClassifier
+from cuml.model_selection import train_test_split
 def exactClassify(sim_vec_dict):
   """Method to classify the given similarity vector dictionary assuming only
      exact matches (having all similarities of 1.0) are matches.
@@ -225,25 +230,28 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
     class_match_set =    set()
     class_nonmatch_set = set()
 
-    import cudf
-    import cupy
-    from cuml.ensemble import RandomForestClassifier
-    from cuml.model_selection import train_test_split
-
     print('Supervised random forest classification of %d record pairs' % \
         (len(sim_vec_dict)))
+    sys.stdout.flush()
 
     rec_pairs = list(sim_vec_dict.keys())
     X = cudf.DataFrame(list(sim_vec_dict.values()))
-    y = cudf.Series([1 if pair in true_match_set else 0 for pair in rec_pairs])
+    
+    # Vectorized label creation using isin for efficient lookup
+    #
+    rec_pairs_series = cudf.Series(rec_pairs)
+    true_match_series = cudf.Series(list(true_match_set))
+    y = rec_pairs_series.isin(true_match_series).astype('int32')
+
 
     # Split data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33,
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33,\
                                                     random_state=42)
 
     print('  Number of training records: %d' % len(X_train))
     print('  Number of testing records: %d' % len(X_test))
     print('')
+    sys.stdout.flush()
 
     # Initialize and train the classifier
     clf = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
@@ -253,19 +261,26 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
     accuracy = clf.score(X_test, y_test)
     print('  Classifier accuracy: %.3f' % accuracy)
     print('')
+    sys.stdout.flush()
 
     # Classify all record pairs
     predictions = clf.predict(X)
+    
+    # Vectorized result collection
+    #
+    predictions_series = cudf.Series(predictions)
+    match_mask = predictions_series == 1
 
-    for i, pair in enumerate(rec_pairs):
-        if predictions[i] == 1:
-            class_match_set.add(pair)
-        else:
-            class_nonmatch_set.add(pair)
+    match_pairs = rec_pairs_series[match_mask]
+    non_match_pairs = rec_pairs_series[~match_mask]
+
+    class_match_set = set(map(tuple, match_pairs.to_arrow().to_pylist()))
+    class_nonmatch_set = set(map(tuple, non_match_pairs.to_arrow().to_pylist()))
 
     print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
     print('')
+    sys.stdout.flush()
 
     return class_match_set, class_nonmatch_set
 

@@ -1,5 +1,7 @@
 import code
 import os 
+import numpy as np
+import sys 
 from collections import Counter
 import cudf
 import cupy
@@ -375,43 +377,103 @@ def edit_dist_sim_comp(val1, val2):
 # =============================================================================
 # Function to compare a block
 
-def compareBlocks(blockA_dict, blockB_dict, recA_dict, recB_dict, attr_comp_list):
+def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     """Build a similarity dictionary with pair of records from the two given
-     block dictionaries.
+     block dictionaries using a vectorized GPU approach with CPU fallback.
 
      Parameter Description:
          blockA_dict (dict): Dictionary of blocks from dataset A.
          blockB_dict (dict): Dictionary of blocks from dataset B.
-         recA_dict (dict): Dictionary of records from dataset A.
-         recB_dict (dict): Dictionary of records from dataset B.
+         recA_gdf (cudf.DataFrame): DataFrame of records from dataset A.
+         recB_gdf (cudf.DataFrame): DataFrame of records from dataset B.
          attr_comp_list (list): List of comparison methods for attributes.
 
      Returns a dictionary of similarity vectors for compared record pairs.
     """
 
-    print(f'Compare {len(blockA_dict)} blocks from dataset A with {len(blockB_dict)} blocks from dataset B')
+    print(f'Vectorizing {len(blockA_dict)} blocks from dataset A with {len(blockB_dict)} blocks from dataset B')
+    sys.stdout.flush()
 
-    sim_vec_dict = {}
-
+    # 1. Generate all candidate pairs from blocks
+    pair_list = []
     for block_bkv, rec_idA_list in blockA_dict.items():
         if block_bkv in blockB_dict:
             rec_idB_list = blockB_dict[block_bkv]
             for rec_idA in rec_idA_list:
                 for rec_idB in rec_idB_list:
-                    recA = recA_dict[rec_idA]
-                    recB = recB_dict[rec_idB]
+                    pair_list.append((rec_idA, rec_idB))
 
-                    sim_vec = []
-                    for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
-                        valA = recA[attr_nameA]
-                        valB = recB[attr_nameB]
-                        sim = comp_funct(valA, valB)
-                        sim_vec.append(sim)
+    if not pair_list:
+        print('  No candidate pairs found after blocking.')
+        return {}
+    
+    pairs_gdf = cudf.DataFrame(pair_list, columns=['rec_id_A', 'rec_id_B'])
+    print(f'  Generated {len(pairs_gdf)} candidate record pairs.')
+    sys.stdout.flush()
 
-                    sim_vec_dict[(rec_idA, rec_idB)] = sim_vec
+    # 2. Join with attribute data
+    recA_gdf_renamed = recA_gdf.add_suffix('_A')
+    recB_gdf_renamed = recB_gdf.add_suffix('_B')
+
+    merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
+    merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
+
+    # 3. Apply comparisons
+    print('  Comparing attribute values for candidate pairs (using native cudf functions where possible)...')
+    sys.stdout.flush()
+    
+    sim_vectors_list = []
+    
+    for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
+        col_A_name = attr_nameA + '_A'
+        col_B_name = attr_nameB + '_B'
+
+        col_A = merged_gdf[col_A_name].fillna('')
+        col_B = merged_gdf[col_B_name].fillna('')
+
+        if comp_funct == exact_comp:
+            sim_col = (col_A == col_B).astype('float32')
+
+        elif comp_funct == jaro_winkler_comp and hasattr(col_A.str, 'jaro_winkler_distance'):
+            sim_col = 1.0 - col_A.str.jaro_winkler_distance(col_B)
+
+        elif comp_funct == edit_dist_sim_comp and hasattr(col_A.str, 'levenshtein_distance'):
+            dist = col_A.str.levenshtein_distance(col_B)
+            len_A = col_A.str.len()
+            len_B = col_B.str.len()
+            max_len = len_A.where(len_A > len_B, len_B)
+            # Prevent division by zero for empty strings
+            max_len = max_len.where(max_len > 0, 1)
+            sim_col = (1.0 - (dist / max_len)).fillna(0)
+
+        else:
+            print(f"    WARNING: '{comp_funct.__name__}' not found or not supported on GPU. Processing on CPU.")
+            sys.stdout.flush()
+            s_A = col_A.to_pandas()
+            s_B = col_B.to_pandas()
+            sim_list = [comp_funct(v1, v2) for v1, v2 in zip(s_A, s_B)]
+            sim_col = cudf.Series(sim_list, nan_as_null=False)
+
+        sim_vectors_list.append(sim_col)
+
+    # 4. Assemble the final dictionary
+    print('  Assembling final similarity vector dictionary...')
+    sys.stdout.flush()
+
+    sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
+    sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
+
+    sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
+    sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
+
+    sim_vec_dict = {}
+    for row in sim_vectors_gdf.to_pandas().itertuples(index=False):
+        key = (row.rec_id_A, row.rec_id_B)
+        sim_vec_dict[key] = list(row)[:-2]
 
     print(f'  Compared {len(sim_vec_dict)} record pairs')
     print('')
+    sys.stdout.flush()
 
     return sim_vec_dict
 # -----------------------------------------------------------------------------

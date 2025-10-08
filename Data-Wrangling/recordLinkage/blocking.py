@@ -4,9 +4,13 @@
 """
 
 import random
+import sys
 import comparison
 import numpy as np
 import cudf
+import faiss
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import normalize
 
 # =============================================================================
 
@@ -312,30 +316,85 @@ def slkBlocking(rec_dict, fam_name_attr_ind, giv_name_attr_ind,
 # - Implement canopy clustering based blocking as described in the lectures
 #   and the Data Matching book
 
+def _vectorize_for_faiss_tfidf(gdf, blk_attr_list):
+    """
+    Vectorizes string attributes of a DataFrame for Faiss using TF-IDF.
+    Returns L2-normalized vectors.
+    """
+    # Combine attributes into a single string per record
+    gdf['combined_attrs'] = ''
+    for col in blk_attr_list:
+        # Fill NA to handle missing values gracefully
+        gdf['combined_attrs'] = gdf['combined_attrs'] + gdf[col].fillna('').astype(str).str.lower() + ' '
+
+    # Use TfidfVectorizer to create vectors from q-grams
+    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 2))
+    vectors = vectorizer.fit_transform(gdf['combined_attrs'].to_arrow().to_pylist())
+
+    # L2 normalize the vectors for cosine similarity
+    vectors = normalize(vectors, norm='l2', axis=1).toarray().astype('float32')
+
+    return vectors
+
 def canopy_clustering(gdf, blk_attr_list, T1, T2):
     """
-    Implements an optimized canopy clustering for blocking records using GPU acceleration.
+    Implements an optimized canopy clustering for blocking records using Faiss ANN.
+
+    This version uses TF-IDF to vectorize string attributes and cosine similarity
+    (approximated with L2 distance in Faiss) as the distance measure.
+    The Faiss search is performed on the GPU using a knn search to simulate
+    a range search.
 
     Parameters:
         gdf (cudf.DataFrame): The DataFrame containing the records.
         blk_attr_list (list): List of attribute names to use for clustering.
-        T1 (float): The loose distance threshold.
+        T1 (float): The loose distance threshold (Jaccard-like distance).
         T2 (float): The tight distance threshold (T2 < T1).
 
     Returns:
         dict: A dictionary with block identifiers as keys and values being lists of
               record identifiers in that block.
     """
+    print("Running optimized canopy clustering with Faiss (GPU knn search)...")
+    sys.stdout.flush()
+
     block_dict = {}
     
-    # Convert the blk_attr_list to cudf series
-    #
-    gdf_attrs = [gdf[attr].astype(str).str.lower() for attr in blk_attr_list]
+    # Vectorize the records using TF-IDF
+    vectors = _vectorize_for_faiss_tfidf(gdf, blk_attr_list)
+    num_records, dim = vectors.shape
     
-    # Get the record identifiers
-    #
+    print(f"  Vectorized {num_records} records into vectors of dimension {dim}.")
+    sys.stdout.flush()
+
+    # Build Faiss index for L2 distance using IndexIVFFlat for GPU support
+    nlist = int(np.sqrt(num_records))
+    quantizer = faiss.IndexFlatL2(dim)
+    index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+
+    # Train the index
+    print("  Training Faiss index...")
+    sys.stdout.flush()
+    index.train(vectors)
+
+    # Move index to GPU
+    res = faiss.StandardGpuResources()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+    gpu_index.add(vectors)
+    gpu_index.nprobe = 10  # Number of cells to visit for search
+
+    print(f"  Built and trained Faiss index on GPU with {nlist} cells.")
+    sys.stdout.flush()
+
+    # Convert Jaccard-like distance thresholds (T1, T2) to SQUARED L2 distance
+    # thresholds for use with Faiss knn search, which returns squared L2 distances.
+    # L2_dist^2 = 2 - 2 * cos_sim. Since T is a distance, sim = 1-T.
+    # L2_dist^2 = 2 - 2 * (1-T) = 2T.
+    l2_T1_squared = 2 * T1
+    l2_T2_squared = 2 * T2
+
     rec_ids = gdf.index.to_arrow().to_pylist()
-    unassigned_rec_indices = set(range(len(rec_ids)))
+    unassigned_rec_indices = set(range(num_records))
 
     total_records = len(rec_ids)
     progress_step = 10
@@ -346,65 +405,50 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
         progress = (assigned_records / total_records) * 100
         if progress >= next_progress:
             print(f"  Canopy clustering progress: {int(progress)}%")
+            sys.stdout.flush()
             next_progress += progress_step
 
         center_index = random.choice(list(unassigned_rec_indices))
+        center_vector = np.array([vectors[center_index, :]], dtype='float32')
+
+        # Use knn search and filter by radius to simulate range search
+        # Set k to a reasonably large number. Capping at 2048 which is a common limit.
+        k = min(num_records, 2048)
+        D, I = gpu_index.search(center_vector, k)
+
+        # Filter results by the T1 radius (using squared distances)
+        canopy_mask = D[0] <= l2_T1_squared
         
-        # Get the canopy center attributes
-        #
-        center_attrs = [s.iloc[center_index] for s in gdf_attrs]
+        canopy_indices = I[0][canopy_mask]
+        canopy_distances_squared = D[0][canopy_mask]
 
-        # Calculate distances from the center to all other points
-        #
-        distances = None
-        for i, attr_name in enumerate(blk_attr_list):
-            
-            # Get the attribute values for all records
-            #
-            all_vals = gdf_attrs[i]
-            
-            # Create a series with the center attribute value
-            #
-            center_attr_series = cudf.Series([center_attrs[i]] * len(all_vals))
+        if len(canopy_indices) > 0:
+            # Get the indices of records within the tight threshold T2
+            close_indices_mask = canopy_distances_squared <= l2_T2_squared
+            close_indices = canopy_indices[close_indices_mask]
 
-            # Calculate the distance for the current attribute
-            #
-            sim = comparison.jaccard_comp_gpu(center_attr_series, all_vals)
-            dist = 1.0 - sim
+            # Remove the close indices from the unassigned set
+            # The search result includes the query point itself, so it will be removed.
+            unassigned_rec_indices.difference_update(close_indices)
+
+            # Create the block key value from the center attributes
+            center_attrs = [gdf[attr].iloc[center_index] for attr in blk_attr_list]
+            canopy_bkv = "".join([str(attr) for attr in center_attrs])
             
-            if distances is None:
-                distances = dist
+            # Get the record identifiers for the canopy
+            canopy_rec_ids = [rec_ids[i] for i in canopy_indices]
+
+            if canopy_bkv in block_dict:
+                block_dict[canopy_bkv].extend(canopy_rec_ids)
             else:
-                distances += dist
-        
-        distances /= len(blk_attr_list)
-        
-        # Get the indices of records within the loose threshold T1
-        #
-        canopy_indices = distances[distances <= T1].index.to_arrow().to_pylist()
-        
-        # Get the indices of records within the tight threshold T2
-        #
-        close_indices = distances[distances <= T2].index.to_arrow().to_pylist()
+                block_dict[canopy_bkv] = canopy_rec_ids
 
-        # Remove the close indices from the unassigned set
-        #
-        unassigned_rec_indices.difference_update(close_indices)
+        else: # No points in canopy, remove center to avoid infinite loop
+            unassigned_rec_indices.remove(center_index)
 
-        # Create the block key value from the center attributes
-        #
-        canopy_bkv = "".join([str(attr) for attr in center_attrs])
-        
-        # Get the record identifiers for the canopy
-        #
-        canopy_rec_ids = [rec_ids[i] for i in canopy_indices]
-
-        if canopy_bkv in block_dict:
-            block_dict[canopy_bkv].extend(canopy_rec_ids)
-        else:
-            block_dict[canopy_bkv] = canopy_rec_ids
 
     print(f"  Generated {len(block_dict)} blocks based on canopy clustering.")
+    sys.stdout.flush()
 
     return block_dict
 # -----------------------------------------------------------------------------

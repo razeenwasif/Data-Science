@@ -31,9 +31,9 @@ import cudf
 # =============================================================================
 # Variable names for loading datasets
 
-datasetA_name = 'datasets/little-dirty-A-10000.csv'
-datasetB_name = 'datasets/little-dirty-B-10000.csv'
-truthfile_name = 'datasets/little-dirty-true-matches-10000.csv'
+datasetA_name = 'datasets/clean-A-1000.csv'
+datasetB_name = 'datasets/clean-B-1000.csv'
+truthfile_name = 'datasets/clean-true-matches-1000.csv'
 
 # datasetA_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv'
 # datasetB_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv'
@@ -99,7 +99,7 @@ blocking.printBlockStatistics(blockA_dict, blockB_dict)
 start_time = time.time()
 
 sim_vec_dict = comparison.compareBlocks(blockA_dict, blockB_dict, \
-                                        recA_dict, recB_dict, \
+                                        recA_gdf, recB_gdf, \
                                         approx_comp_funct_list)
 
 comparison_time = time.time() - start_time
