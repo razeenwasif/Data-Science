@@ -337,7 +337,17 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     rec_ids = gdf.index.to_arrow().to_pylist()
     unassigned_rec_indices = set(range(len(rec_ids)))
 
+    total_records = len(rec_ids)
+    progress_step = 10
+    next_progress = progress_step
+
     while unassigned_rec_indices:
+        assigned_records = total_records - len(unassigned_rec_indices)
+        progress = (assigned_records / total_records) * 100
+        if progress >= next_progress:
+            print(f"  Canopy clustering progress: {int(progress)}%")
+            next_progress += progress_step
+
         center_index = random.choice(list(unassigned_rec_indices))
         
         # Get the canopy center attributes
@@ -383,7 +393,7 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
 
         # Create the block key value from the center attributes
         #
-        canopy_bkv = "".join(center_attrs)
+        canopy_bkv = "".join([str(attr) for attr in center_attrs])
         
         # Get the record identifiers for the canopy
         #

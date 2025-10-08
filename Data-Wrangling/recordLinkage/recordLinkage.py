@@ -1,4 +1,4 @@
-# ============================================================================
+# =============================================================================
 # Record linkage software for the COMP3430/COMP8430 Data Wrangling course, 
 # 2025.
 # Version 1.0
@@ -24,86 +24,32 @@ import blocking
 import comparison
 import classification
 import evaluation
+import cudf
+
+# conda run -n rapids-25.08 python3 recordLinkage.py
 
 # =============================================================================
 # Variable names for loading datasets
 
-# ******** Uncomment to select a pair of datasets **************
+datasetA_name = 'datasets/little-dirty-A-10000.csv'
+datasetB_name = 'datasets/little-dirty-B-10000.csv'
+truthfile_name = 'datasets/little-dirty-true-matches-10000.csv'
 
-datasetA_name = 'datasets/clean-A-50.csv'
-datasetB_name = 'datasets/clean-B-50.csv'
+# datasetA_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv'
+# datasetB_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv'
+# truthfile_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv'
 
-#datasetA_name = 'datasets/clean-A-1000.csv'
-#datasetB_name = 'datasets/clean-B-1000.csv'
+headerA_line   = True
+headerB_line   = True
 
-#datasetA_name = 'datasets/clean-A-10000.csv'
-#datasetB_name = 'datasets/clean-B-10000.csv'
-
-#datasetA_name = 'datasets/little-dirty-A-10000.csv'
-#datasetB_name = 'datasets/little-dirty-B-10000.csv'
-
-#datasetA_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv'
-#datasetB_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv'
-
-
-headerA_line   = True  # Dataset A header line available - True or Flase
-headerB_line   = True  # Dataset B header line available - True or Flase
-
-# Name of the corresponding file with true matching record pair
-
-# ***** Uncomment a file name corresponding to your selected datasets *******
-
-truthfile_name = 'datasets/clean-true-matches-50.csv'
-#truthfile_name = 'datasets/clean-true-matches-1000.csv'
-#truthfile_name = 'datasets/clean-true-matches-10000.csv'
-#truthfile_name = 'datasets/little-dirty-true-matches-10000.csv'
-#truthfile_name = 'datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv'
-
-# The two attribute numbers that contain the record identifiers
-#
 rec_idA_col = 0
 rec_idB_col = 0
 
-# The list of attributes to be used either for blocking or linking
-#
-# For the example data sets used in COMP8430 data wrangling in 2025:
-# 
-#  0: rec_id
-#  1: first_name
-#  2: middle_name
-#  3: last_name
-#  4: gender
-#  5: current_age
-#  6: birth_date
-#  7: street_address
-#  8: suburb
-#  9: postcode
-# 10: state
-# 11: phone
-# 12: email
-
 attr_list = ['first_name', 'middle_name', 'last_name', 'gender', 'birth_date', 'street_address', 'suburb', 'postcode', 'state', 'phone']
 
-# ******** In lab 3, explore different attribute sets for blocking ************
-
-# The list of attributes to use for blocking (all must occur in the above
-# attribute lists)
+# The list of tuples (comparison function, attribute name in record A,
+# attribute name in record B)
 #
-blocking_attr_list = ['last_name', 'gender']
-
-# ******** In lab 4, explore different comparison functions for different  ****
-# ********           attributes                                            ****
-
-# The list of tuples (comparison function, attribute number in record A,
-# attribute number in record B)
-#
-exact_comp_funct_list = [(comparison.exact_comp, 'first_name', 'first_name'),
-                         (comparison.exact_comp, 'middle_name', 'middle_name'),
-                         (comparison.exact_comp, 'last_name', 'last_name'),
-                         (comparison.exact_comp, 'suburb', 'suburb'),
-                         (comparison.exact_comp, 'state', 'state'),
-                         ]
-
 approx_comp_funct_list = [(comparison.jaccard_comp, 'first_name', 'first_name'),
                           (comparison.dice_comp, 'middle_name', 'middle_name'),
                           (comparison.jaro_winkler_comp, 'last_name', 'last_name'),
@@ -130,15 +76,10 @@ loading_time = time.time() - start_time
 # -----------------------------------------------------------------------------
 # Step 2: Block the datasets
 
-import cudf
-
 start_time = time.time()
 
 recA_gdf = cudf.DataFrame.from_dict(recA_dict, orient='index')
 recB_gdf = cudf.DataFrame.from_dict(recB_dict, orient='index')
-
-#blockA_dict = blocking.simpleBlocking(recA_gdf, blocking_attr_list)
-#blockB_dict = blocking.simpleBlocking(recB_gdf, blocking_attr_list)
 
 canopy_attr_list = ['first_name', 'last_name']
 T1 = 0.8 # Loose Threshold (distance)
@@ -168,29 +109,8 @@ comparison_time = time.time() - start_time
 
 start_time = time.time()
 
-# Exact matching based classification
-#
-# class_match_set, class_nonmatch_set = \
-# classification.exactClassify(sim_vec_dict)
-
-# *********** In lab 5, explore different similarity threshold values *********
-
-# A supervised decision tree classifier
-#
 class_match_set, class_nonmatch_set = \
            classification.supervisedMLClassify(sim_vec_dict, true_match_set)
-
-# Minimum similarity threshold based classification
-#
-#min_sim_threshold = 0.5
-#class_match_set, class_nonmatch_set = \
-#             classification.minThresholdClassify(sim_vec_dict,
-#                                                 min_sim_threshold)
-
-# A supervised decision tree classifier
-#
-#class_match_set, class_nonmatch_set = \
-#           classification.supervisedMLClassify(sim_vec_dict, true_match_set)
 
 classification_time = time.time() - start_time
 

@@ -3,7 +3,7 @@ import os
 from collections import Counter
 import cudf
 import cupy
-from numba_kernels import calculate_jaccard_similarity_gpu, get_q_grams_set
+from numba_kernels import calculate_jaccard_similarity_gpu_pairwise, get_q_grams_set
 from comparison_kernels import compare_kernel
 
 """ Module with functionalities for comparison of attribute values as well as
@@ -26,7 +26,7 @@ def exact_comp(val1, val2):
 
 	# If at least one of the values is empty return 0
 	#
-	if (len(val1) == 0) or (len(val2) == 0):
+	if val1 is None or val2 is None or (len(val1) == 0) or (len(val2) == 0):
 		return 0.0
 
 	elif (val1 != val2):
@@ -45,7 +45,7 @@ def jaccard_comp(val1, val2):
 
 	# If at least one of the values is empty return 0
 	#
-	if (len(val1) == 0) or (len(val2) == 0):
+	if val1 is None or val2 is None or (len(val1) == 0) or (len(val2) == 0):
 		return 0.0
 
 	# If both attribute values exactly match return 1
@@ -87,14 +87,13 @@ def jaccard_comp_gpu(vals1, vals2):
     Calculate the Jaccard similarity between two cuDF Series of strings on the GPU.
     """
     
-    sims = []
     vals1_list = vals1.to_arrow().to_pylist()
     vals2_list = vals2.to_arrow().to_pylist()
 
-    for s1, s2 in zip(vals1_list, vals2_list):
-        set1 = get_q_grams_set(s1)
-        set2 = get_q_grams_set(s2)
-        sims.append(calculate_jaccard_similarity_gpu(set1, set2))
+    sets1 = [get_q_grams_set(s) for s in vals1_list]
+    sets2 = [get_q_grams_set(s) for s in vals2_list]
+    
+    sims = calculate_jaccard_similarity_gpu_pairwise(sets1, sets2)
     
     return cudf.Series(sims)
 
@@ -109,7 +108,7 @@ def dice_comp(val1, val2):
 
 	# If at least one of the values is empty return 0
 	#
-	if (len(val1) == 0) or (len(val2) == 0):
+	if val1 is None or val2 is None or (len(val1) == 0) or (len(val2) == 0):
 		return 0.0
 
 	# If both attribute values exactly match return 1
@@ -282,7 +281,7 @@ def bag_dist_sim_comp(val1, val2):
 
 	# If at least one of the values is empty return 0
 	#
-	if (len(val1) == 0) or (len(val2) == 0):
+	if val1 is None or val2 is None or (len(val1) == 0) or (len(val2) == 0):
 		return 0.0
 
 	# If both attribute values exactly match return 1
@@ -316,7 +315,7 @@ def edit_dist_sim_comp(val1, val2):
 
 	# If at least one of the values is empty return 0
 	#
-	if (len(val1) == 0) or (len(val2) == 0):
+	if val1 is None or val2 is None or (len(val1) == 0) or (len(val2) == 0):
 		return 0.0
 
 	# If both attribute values exactly match return 1
