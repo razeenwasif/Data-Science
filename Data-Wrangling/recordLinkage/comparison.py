@@ -5,7 +5,7 @@ import sys
 from collections import Counter
 import cudf
 import cupy
-from numba_kernels import calculate_jaccard_similarity_gpu_pairwise, get_q_grams_set
+from numba_kernels import calculate_jaccard_similarity_gpu_pairwise, calculate_dice_similarity_gpu_pairwise, get_q_grams_set
 from comparison_kernels import compare_kernel
 
 """ Module with functionalities for comparison of attribute values as well as
@@ -445,6 +445,22 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
             # Prevent division by zero for empty strings
             max_len = max_len.where(max_len > 0, 1)
             sim_col = (1.0 - (dist / max_len)).fillna(0)
+
+        elif comp_funct == jaccard_comp:
+            print(f"    GPU kernel for: '{comp_funct.__name__}'")
+            sys.stdout.flush()
+            sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
+            sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
+            sim_array = calculate_jaccard_similarity_gpu_pairwise(sets_A, sets_B)
+            sim_col = cudf.Series(sim_array)
+
+        elif comp_funct == dice_comp:
+            print(f"    GPU kernel for: '{comp_funct.__name__}'")
+            sys.stdout.flush()
+            sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
+            sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
+            sim_array = calculate_dice_similarity_gpu_pairwise(sets_A, sets_B)
+            sim_col = cudf.Series(sim_array)
 
         else:
             print(f"    WARNING: '{comp_funct.__name__}' not found or not supported on GPU. Processing on CPU.")
