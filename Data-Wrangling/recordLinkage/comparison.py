@@ -7,6 +7,11 @@ import cudf
 import cugraph
 import cupy
 from numba_kernels import calculate_jaccard_similarity_gpu_pairwise, calculate_dice_similarity_gpu_pairwise, get_q_grams_set
+from numba import cuda
+from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
+
+
 from comparison_kernels import compare_kernel
 
 """ Module with functionalities for comparison of attribute values as well as
@@ -380,16 +385,8 @@ def edit_dist_sim_comp(val1, val2):
 
 def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     """Build a similarity dictionary with pair of records from the two given
-     block dictionaries using a vectorized GPU approach with CPU fallback.
-
-     Parameter Description:
-         blockA_dict (dict): Dictionary of blocks from dataset A.
-         blockB_dict (dict): Dictionary of blocks from dataset B.
-         recA_gdf (cudf.DataFrame): DataFrame of records from dataset A.
-         recB_gdf (cudf.DataFrame): DataFrame of records from dataset B.
-         attr_comp_list (list): List of comparison methods for attributes.
-
-     Returns a dictionary of similarity vectors for compared record pairs.
+     block dictionaries using a vectorized GPU approach with CPU fallback for
+     unsupported functions.
     """
 
     print(f'Vectorizing {len(blockA_dict)} blocks from dataset A with {len(blockB_dict)} blocks from dataset B')
@@ -420,7 +417,7 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
 
     # 3. Apply comparisons
-    print('  Comparing attribute values for candidate pairs (using native cudf functions where possible)...')
+    print('  Comparing attribute values for candidate pairs (using native cudf and custom kernels where possible)...')
     sys.stdout.flush()
     
     sim_vectors_list = []
@@ -435,17 +432,7 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
         if comp_funct == exact_comp:
             sim_col = (col_A == col_B).astype('float32')
 
-        elif comp_funct == jaro_winkler_comp and hasattr(col_A.str, 'jaro_winkler_distance'):
-            sim_col = 1.0 - col_A.str.jaro_winkler_distance(col_B)
 
-        elif comp_funct == edit_dist_sim_comp and hasattr(col_A.str, 'levenshtein_distance'):
-            dist = col_A.str.levenshtein_distance(col_B)
-            len_A = col_A.str.len()
-            len_B = col_B.str.len()
-            max_len = len_A.where(len_A > len_B, len_B)
-            # Prevent division by zero for empty strings
-            max_len = max_len.where(max_len > 0, 1)
-            sim_col = (1.0 - (dist / max_len)).fillna(0)
 
         elif comp_funct == jaccard_comp:
             print(f"    GPU kernel for: '{comp_funct.__name__}'")
@@ -464,7 +451,7 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
             sim_col = cudf.Series(sim_array)
 
         else:
-            print(f"    WARNING: '{comp_funct.__name__}' not found or not supported on GPU. Processing on CPU.")
+            print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
             sys.stdout.flush()
             s_A = col_A.to_pandas()
             s_B = col_B.to_pandas()

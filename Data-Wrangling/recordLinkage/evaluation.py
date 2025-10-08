@@ -251,4 +251,63 @@ def pairs_quality(cand_rec_id_pair_list, true_match_set):
 
 # -----------------------------------------------------------------------------
 
+
+def evaluate_linkage(class_match_set, class_nonmatch_set, true_match_set, all_comparisons):
+  """Evaluate the linkage process and print the results.
+
+     Parameter Description:
+       class_match_set    : Set of classified matches (record identifier
+                            pairs)
+       class_nonmatch_set : Set of classified non-matches (record identifier
+                            pairs)
+       true_match_set     : Set of true matches (record identifier pairs)
+       all_comparisons    : The total number of comparisons between all record
+                            pairs
+  """
+
+  print('Linkage evaluation:')
+  print('===================')
+
+  conf_matrix = confusion_matrix(class_match_set, class_nonmatch_set, true_match_set, all_comparisons)
+
+  acc = accuracy(conf_matrix)
+  print(f'Accuracy: {acc:.3f}')
+
+  prec = precision(conf_matrix)
+  print(f'Precision: {prec:.3f}')
+
+  rec = recall(conf_matrix)
+  print(f'Recall: {rec:.3f}')
+
+  f_measure = fmeasure(conf_matrix)
+  print(f'F-measure: {f_measure:.3f}')
+
+# -----------------------------------------------------------------------------
+
+def evaluate_blocking(cand_rec_id_pair_list, true_match_set, num_comparisons, all_comparisons):
+  """Evaluate the blocking process and print the results.
+
+     Parameter Description:
+       cand_rec_id_pair_list : A list of candidate record ID pairs.
+       true_match_set        : A set of true match record ID pairs.
+       num_comparisons       : The number of comparisons made (the number of
+                               candidate pairs).
+       all_comparisons       : The total number of possible comparisons.
+  """
+
+  print('Blocking evaluation:')
+  print('====================')
+
+  rr = reduction_ratio(num_comparisons, all_comparisons)
+  print(f'Reduction ratio: {rr:.3f}')
+
+  pc = pairs_completeness(cand_rec_id_pair_list, true_match_set)
+  print(f'Pairs completeness: {pc:.3f}')
+
+  pq = pairs_quality(cand_rec_id_pair_list, true_match_set)
+  print(f'Pairs quality: {pq:.3f}')
+
+# -----------------------------------------------------------------------------
+
 # End of program.
+
