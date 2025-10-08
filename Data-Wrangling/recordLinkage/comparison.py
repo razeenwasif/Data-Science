@@ -11,6 +11,134 @@ from numba import cuda
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
+MAX_STRING_LEN = 256
+
+
+@cuda.jit
+def gpu_jaro_winkler(s1, s2, out):
+    i = cuda.grid(1)
+    if i < s1.shape[0]:
+        out[i] = jaro_winkler_similarity_kernel(s1[i], s2[i])
+
+@cuda.jit
+def gpu_levenshtein(s1, s2, out):
+    i = cuda.grid(1)
+    if i < s1.shape[0]:
+        out[i] = levenshtein_similarity_kernel(s1[i], s2[i])
+
+
+def get_char_vocab(s1, s2):
+    """Create a character vocabulary from two series of strings."""
+    chars = set()
+    for s in s1.to_pandas():
+        chars.update(s)
+    for s in s2.to_pandas():
+        chars.update(s)
+    char_to_int = {char: i for i, char in enumerate(chars)}
+    return char_to_int
+
+def strings_to_char_arrays(s, char_to_int):
+    """Convert a series of strings to a 2D numpy array of character indices."""
+    num_strings = len(s)
+    char_arrays = np.zeros((num_strings, MAX_STRING_LEN), dtype=np.int32)
+    for i, string in enumerate(s.to_pandas()):
+        for j, char in enumerate(string):
+            if j < MAX_STRING_LEN:
+                char_arrays[i, j] = char_to_int[char]
+    return char_arrays
+
+@cuda.jit(device=True)
+def jaro_winkler_similarity_kernel(s1, s2):
+    """Numba CUDA kernel for Jaro-Winkler similarity."""
+    len1 = len(s1)
+    len2 = len(s2)
+
+    if len1 == 0 or len2 == 0:
+        return 0.0
+
+    match_distance = (max(len1, len2) // 2) - 1
+
+    s1_matches = cuda.local.array(MAX_STRING_LEN, dtype=np.bool_)
+    s2_matches = cuda.local.array(MAX_STRING_LEN, dtype=np.bool_)
+
+    for i in range(len1):
+        s1_matches[i] = False
+    for i in range(len2):
+        s2_matches[i] = False
+
+    matches = 0
+    transpositions = 0
+
+    for i in range(len1):
+        start = max(0, i - match_distance)
+        end = min(i + match_distance + 1, len2)
+
+        for j in range(start, end):
+            if not s2_matches[j] and s1[i] == s2[j]:
+                s1_matches[i] = True
+                s2_matches[j] = True
+                matches += 1
+                break
+
+    if matches == 0:
+        return 0.0
+
+    k = 0
+    for i in range(len1):
+        if s1_matches[i]:
+            while not s2_matches[k]:
+                k += 1
+            if s1[i] != s2[k]:
+                transpositions += 1
+            k += 1
+
+    jaro_sim = (matches / len1 + matches / len2 + (matches - transpositions // 2) / matches) / 3.0
+
+    # Winkler modification
+    prefix = 0
+    for i in range(min(len1, len2, 4)):
+        if s1[i] == s2[i]:
+            prefix += 1
+        else:
+            break
+
+    return jaro_sim + prefix * 0.1 * (1.0 - jaro_sim)
+
+@cuda.jit(device=True)
+def levenshtein_similarity_kernel(s1, s2):
+    """Numba CUDA kernel for Levenshtein similarity."""
+    len1 = len(s1)
+    len2 = len(s2)
+
+    if len1 == 0 or len2 == 0:
+        return 0.0
+
+    if len1 < len2:
+        s1, s2 = s2, s1
+        len1, len2 = len2, len1
+
+    prev_row = cuda.local.array(MAX_STRING_LEN, dtype=np.int32)
+    curr_row = cuda.local.array(MAX_STRING_LEN, dtype=np.int32)
+
+    for i in range(len2 + 1):
+        prev_row[i] = i
+
+    for i in range(1, len1 + 1):
+        curr_row[0] = i
+        for j in range(1, len2 + 1):
+            cost = 0 if s1[i - 1] == s2[j - 1] else 1
+            curr_row[j] = min(curr_row[j - 1] + 1,
+                                prev_row[j] + 1,
+                                prev_row[j - 1] + cost)
+        for j in range(len2 + 1):
+            prev_row[j] = curr_row[j]
+
+    return 1.0 - (curr_row[len2] / len1)
+
+
+
+
+
 
 from comparison_kernels import compare_kernel
 
@@ -449,6 +577,30 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
             sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
             sim_array = calculate_dice_similarity_gpu_pairwise(sets_A, sets_B)
             sim_col = cudf.Series(sim_array)
+
+
+        elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
+            print(f"    GPU kernel for: '{comp_funct.__name__}'")
+            sys.stdout.flush()
+
+            char_to_int = get_char_vocab(col_A, col_B)
+
+            s1_arr = strings_to_char_arrays(col_A, char_to_int)
+            s2_arr = strings_to_char_arrays(col_B, char_to_int)
+
+            d_s1 = cuda.to_device(s1_arr)
+            d_s2 = cuda.to_device(s2_arr)
+            d_out = cuda.device_array(len(col_A), dtype=np.float32)
+
+            threadsperblock = 256
+            blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
+
+            if comp_funct == jaro_winkler_comp:
+                gpu_jaro_winkler[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+            else:
+                gpu_levenshtein[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+
+            sim_col = cudf.Series(d_out)
 
         else:
             print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
