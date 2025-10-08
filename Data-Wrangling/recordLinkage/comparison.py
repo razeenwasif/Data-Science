@@ -4,6 +4,7 @@ import numpy as np
 import sys 
 from collections import Counter
 import cudf
+import cugraph
 import cupy
 from numba_kernels import calculate_jaccard_similarity_gpu_pairwise, calculate_dice_similarity_gpu_pairwise, get_q_grams_set
 from comparison_kernels import compare_kernel
