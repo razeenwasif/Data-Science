@@ -47,8 +47,7 @@ def load_data_set(file_name, rec_id_col_name, use_attr_list):
 
     print(f'  Record identifier attribute: {rec_id_col}')
     print('  Attributes to use:')
-    for attr_name in use_attr_list:
-        print(f'    {attr_name.lower()}')
+    print(f"    {' '.join(attr.lower() for attr in use_attr_list)}")
 
     print(f'  Loaded {len(gdf)} records.')
     print('')

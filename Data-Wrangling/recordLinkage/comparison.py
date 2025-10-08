@@ -533,99 +533,104 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
         print('  No candidate pairs found after blocking.')
         return {}
     
-    pairs_gdf = cudf.DataFrame(pair_list, columns=['rec_id_A', 'rec_id_B'])
-    print(f'  Generated {len(pairs_gdf)} candidate record pairs.')
+    print(f'  Generated {len(pair_list)} candidate record pairs.')
     sys.stdout.flush()
 
-    # 2. Join with attribute data
+    sim_vec_dict = {}
+    chunk_size = 10000000  # Process 10 million pairs at a time to manage memory
+
     recA_gdf_renamed = recA_gdf.add_suffix('_A')
     recB_gdf_renamed = recB_gdf.add_suffix('_B')
 
-    merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
-    merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
+    for i in range(0, len(pair_list), chunk_size):
+        chunk_pairs = pair_list[i:i + chunk_size]
+        
+        pairs_gdf = cudf.DataFrame(chunk_pairs, columns=['rec_id_A', 'rec_id_B'])
 
-    # 3. Apply comparisons
-    print('  Comparing attribute values for candidate pairs (using native cudf and custom kernels where possible)...')
-    sys.stdout.flush()
-    
-    sim_vectors_list = []
-    
-    for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
-        col_A_name = attr_nameA + '_A'
-        col_B_name = attr_nameB + '_B'
+        # 2. Join with attribute data
+        merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
+        merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
 
-        col_A = merged_gdf[col_A_name].fillna('')
-        col_B = merged_gdf[col_B_name].fillna('')
+        # 3. Apply comparisons
+        print(f'  Comparing attribute values for candidate pairs chunk {i//chunk_size + 1} (using native cudf and custom kernels where possible)...')
+        sys.stdout.flush()
+        
+        sim_vectors_list = []
+        
+        for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
+            col_A_name = attr_nameA + '_A'
+            col_B_name = attr_nameB + '_B'
 
-        if comp_funct == exact_comp:
-            sim_col = (col_A == col_B).astype('float32')
+            col_A = merged_gdf[col_A_name].fillna('')
+            col_B = merged_gdf[col_B_name].fillna('')
 
+            if comp_funct == exact_comp:
+                sim_col = (col_A == col_B).astype('float32')
 
+            elif comp_funct == jaccard_comp:
+                print(f"    GPU kernel for: '{comp_funct.__name__}'")
+                sys.stdout.flush()
+                sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
+                sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
+                sim_array = calculate_jaccard_similarity_gpu_pairwise(sets_A, sets_B)
+                sim_col = cudf.Series(sim_array)
 
-        elif comp_funct == jaccard_comp:
-            print(f"    GPU kernel for: '{comp_funct.__name__}'")
-            sys.stdout.flush()
-            sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
-            sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
-            sim_array = calculate_jaccard_similarity_gpu_pairwise(sets_A, sets_B)
-            sim_col = cudf.Series(sim_array)
+            elif comp_funct == dice_comp:
+                print(f"    GPU kernel for: '{comp_funct.__name__}'")
+                sys.stdout.flush()
+                sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
+                sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
+                sim_array = calculate_dice_similarity_gpu_pairwise(sets_A, sets_B)
+                sim_col = cudf.Series(sim_array)
 
-        elif comp_funct == dice_comp:
-            print(f"    GPU kernel for: '{comp_funct.__name__}'")
-            sys.stdout.flush()
-            sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
-            sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
-            sim_array = calculate_dice_similarity_gpu_pairwise(sets_A, sets_B)
-            sim_col = cudf.Series(sim_array)
+            elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
+                print(f"    GPU kernel for: '{comp_funct.__name__}'")
+                sys.stdout.flush()
 
+                char_to_int = get_char_vocab(col_A, col_B)
 
-        elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
-            print(f"    GPU kernel for: '{comp_funct.__name__}'")
-            sys.stdout.flush()
+                s1_arr = strings_to_char_arrays(col_A, char_to_int)
+                s2_arr = strings_to_char_arrays(col_B, char_to_int)
 
-            char_to_int = get_char_vocab(col_A, col_B)
+                d_s1 = cuda.to_device(s1_arr)
+                d_s2 = cuda.to_device(s2_arr)
+                d_out = cuda.device_array(len(col_A), dtype=np.float32)
 
-            s1_arr = strings_to_char_arrays(col_A, char_to_int)
-            s2_arr = strings_to_char_arrays(col_B, char_to_int)
+                threadsperblock = 256
+                blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
 
-            d_s1 = cuda.to_device(s1_arr)
-            d_s2 = cuda.to_device(s2_arr)
-            d_out = cuda.device_array(len(col_A), dtype=np.float32)
+                if comp_funct == jaro_winkler_comp:
+                    gpu_jaro_winkler[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+                else:
+                    gpu_levenshtein[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
 
-            threadsperblock = 256
-            blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
+                sim_col = cudf.Series(d_out)
 
-            if comp_funct == jaro_winkler_comp:
-                gpu_jaro_winkler[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
             else:
-                gpu_levenshtein[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+                print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
+                sys.stdout.flush()
+                s_A = col_A.to_pandas()
+                s_B = col_B.to_pandas()
+                sim_list = [comp_funct(v1, v2) for v1, v2 in zip(s_A, s_B)]
+                sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-            sim_col = cudf.Series(d_out)
+            sim_vectors_list.append(sim_col)
 
-        else:
-            print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
-            sys.stdout.flush()
-            s_A = col_A.to_pandas()
-            s_B = col_B.to_pandas()
-            sim_list = [comp_funct(v1, v2) for v1, v2 in zip(s_A, s_B)]
-            sim_col = cudf.Series(sim_list, nan_as_null=False)
+        # 4. Assemble the final dictionary for the chunk
+        sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
+        sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
 
-        sim_vectors_list.append(sim_col)
+        sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
+        sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
 
-    # 4. Assemble the final dictionary
-    print('  Assembling final similarity vector dictionary...')
-    sys.stdout.flush()
-
-    sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
-    sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
-
-    sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
-    sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
-
-    sim_vec_dict = {}
-    for row in sim_vectors_gdf.to_pandas().itertuples(index=False):
-        key = (row.rec_id_A, row.rec_id_B)
-        sim_vec_dict[key] = list(row)[:-2]
+        for row in sim_vectors_gdf.to_pandas().itertuples(index=False):
+            key = (row.rec_id_A, row.rec_id_B)
+            sim_vec_dict[key] = list(row)[:-2]
+            
+        # Clean up memory
+        del pairs_gdf, merged_gdf, sim_vectors_gdf
+        import gc
+        gc.collect()
 
     print(f'  Compared {len(sim_vec_dict)} record pairs')
     print('')
