@@ -75,22 +75,43 @@ def main():
     # Step 2: Block the datasets
     start_time = time.time()
 
-    # --- First blocking pass: simple on state ---
-    logging.info('Running simple blocking on state...')
-    simple_attrs = ['state']
-    blockA_dict_1 = blocking.simpleBlocking(recA_gdf, simple_attrs)
-    blockB_dict_1 = blocking.simpleBlocking(recB_gdf, simple_attrs)
+    # --- Partitioning Pass: simple blocking on state ---
+    logging.info('Partitioning datasets by state...')
+    partition_attr = ['state']
+    state_blocks_A = blocking.simpleBlocking(recA_gdf, partition_attr)
+    state_blocks_B = blocking.simpleBlocking(recB_gdf, partition_attr)
 
-    # --- Second blocking pass: canopy clustering ---
-    logging.info('Running canopy clustering...')
+    final_blocks_A = {}
+    final_blocks_B = {}
+
+    # --- Canopy Clustering within each partition ---
+    logging.info('Running canopy clustering within each state partition...')
     canopy_attrs = ['first_name', 'last_name', 'suburb']
-    blockA_dict_2 = blocking.canopy_clustering(recA_gdf, canopy_attrs, T1=0.6, T2=0.4)
-    blockB_dict_2 = blocking.canopy_clustering(recB_gdf, canopy_attrs, T1=0.6, T2=0.4)
 
-    # --- Merge the blocks ---
-    logging.info('Merging blocks...')
-    blockA_dict = blocking.merge_block_dicts(blockA_dict_1, blockA_dict_2)
-    blockB_dict = blocking.merge_block_dicts(blockB_dict_1, blockB_dict_2)
+    # Get a set of common state keys to iterate over
+    common_states = set(state_blocks_A.keys()) & set(state_blocks_B.keys())
+
+    for i, state_key in enumerate(common_states):
+        logging.info(f'  Processing partition {i+1}/{len(common_states)}: {state_key}')
+
+        rec_ids_A = state_blocks_A[state_key]
+        rec_ids_B = state_blocks_B[state_key]
+
+        # Filter main GDFs to get records for the current state
+        temp_gdf_A = recA_gdf.loc[rec_ids_A]
+        temp_gdf_B = recB_gdf.loc[rec_ids_B]
+
+        # Run canopy clustering on the smaller, state-specific dataframes
+        canopy_blocks_A = blocking.canopy_clustering(temp_gdf_A, canopy_attrs, T1=0.8, T2=0.6)
+        canopy_blocks_B = blocking.canopy_clustering(temp_gdf_B, canopy_attrs, T1=0.8, T2=0.6)
+
+        # Merge the results from this partition into the final block dictionaries
+        final_blocks_A = blocking.merge_block_dicts(final_blocks_A, canopy_blocks_A)
+        final_blocks_B = blocking.merge_block_dicts(final_blocks_B, canopy_blocks_B)
+
+    # Use the final merged blocks for the rest of the process
+    blockA_dict = final_blocks_A
+    blockB_dict = final_blocks_B
 
     blocking_time = time.time() - start_time
     logging.info(f"Data blocking took {blocking_time:.3f} seconds.")
