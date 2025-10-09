@@ -511,6 +511,102 @@ def edit_dist_sim_comp(val1, val2):
 # =============================================================================
 # Function to compare a block
 
+def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_list, chunk_num):
+    """Helper function to process a single chunk of candidate pairs."""
+
+    pairs_gdf = cudf.DataFrame(pairs_chunk, columns=['rec_id_A', 'rec_id_B'])
+
+    # 2. Join with attribute data
+    merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
+    merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
+
+    # 3. Apply comparisons
+    print(f'  Comparing attribute values for candidate pairs chunk {chunk_num} (using native cudf and custom kernels where possible)...')
+    sys.stdout.flush()
+    
+    sim_vectors_list = []
+    
+    for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
+        col_A_name = attr_nameA + '_A'
+        col_B_name = attr_nameB + '_B'
+
+        col_A = merged_gdf[col_A_name].fillna('')
+        col_B = merged_gdf[col_B_name].fillna('')
+
+        if comp_funct == exact_comp:
+            sim_col = (col_A == col_B).astype('float32')
+
+        elif comp_funct == jaccard_comp:
+            # ... (GPU Jaccard logic remains the same)
+            qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
+            qgrams_A.columns = ['index', 'qgram']
+            qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
+            qgrams_B.columns = ['index', 'qgram']
+            qgrams_A = qgrams_A.drop_duplicates()
+            qgrams_B = qgrams_B.drop_duplicates()
+            len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
+            len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
+            intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
+            intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
+            sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
+            union_size = sim_df['len_A'] + sim_df['len_B'] - sim_df['intersection_size']
+            sim_col = (sim_df['intersection_size'] / union_size).fillna(0)
+
+        elif comp_funct == dice_comp:
+            # ... (GPU Dice logic remains the same)
+            qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
+            qgrams_A.columns = ['index', 'qgram']
+            qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
+            qgrams_B.columns = ['index', 'qgram']
+            qgrams_A = qgrams_A.drop_duplicates()
+            qgrams_B = qgrams_B.drop_duplicates()
+            len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
+            len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
+            intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
+            intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
+            sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
+            sum_len = sim_df['len_A'] + sim_df['len_B']
+            sim_col = (2 * sim_df['intersection_size'] / sum_len).fillna(0)
+
+        elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
+            # ... (GPU Jaro/Levenshtein logic remains the same)
+            char_to_int = get_char_vocab(col_A, col_B)
+            s1_arr = strings_to_char_arrays(col_A, char_to_int)
+            s2_arr = strings_to_char_arrays(col_B, char_to_int)
+            d_s1 = cuda.to_device(s1_arr)
+            d_s2 = cuda.to_device(s2_arr)
+            d_out = cuda.device_array(len(col_A), dtype=np.float32)
+            threadsperblock = 256
+            blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
+            if comp_funct == jaro_winkler_comp:
+                gpu_jaro_winkler[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+            else:
+                gpu_levenshtein[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
+            sim_col = cudf.Series(d_out)
+
+        else:
+            print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
+            sys.stdout.flush()
+            s_A = col_A.to_pandas()
+            s_B = col_B.to_pandas()
+            sim_list = [comp_funct(v1, v2) for v1, v2 in zip(s_A, s_B)]
+            sim_col = cudf.Series(sim_list, nan_as_null=False)
+
+        sim_vectors_list.append(sim_col)
+
+    # 4. Assemble the final DataFrame for the chunk
+    sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
+    sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
+    sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
+    sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
+
+    # Clean up memory
+    del pairs_gdf, merged_gdf
+    import gc
+    gc.collect()
+
+    return sim_vectors_gdf
+
 def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     """Build a similarity dictionary with pair of records from the two given
      block dictionaries using a vectorized GPU approach with CPU fallback for
@@ -520,160 +616,35 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     print(f'Vectorizing {len(blockA_dict)} blocks from dataset A with {len(blockB_dict)} blocks from dataset B')
     sys.stdout.flush()
 
-    # 1. Generate all candidate pairs from blocks
-    pair_list = []
+    all_sim_vectors_gdf = []
+    chunk_size = 1000000  # Process 1 million pairs at a time to manage memory
+    pair_buffer = []
+    chunk_num = 1
+
+    recA_gdf_renamed = recA_gdf.add_suffix('_A')
+    recB_gdf_renamed = recB_gdf.add_suffix('_B')
+
     for block_bkv, rec_idA_list in blockA_dict.items():
         if block_bkv in blockB_dict:
             rec_idB_list = blockB_dict[block_bkv]
             for rec_idA in rec_idA_list:
                 for rec_idB in rec_idB_list:
-                    pair_list.append((rec_idA, rec_idB))
+                    pair_buffer.append((rec_idA, rec_idB))
 
-    if not pair_list:
+                    if len(pair_buffer) >= chunk_size:
+                        sim_vectors_chunk = _process_chunk(pair_buffer, recA_gdf_renamed, recB_gdf_renamed, attr_comp_list, chunk_num)
+                        all_sim_vectors_gdf.append(sim_vectors_chunk)
+                        pair_buffer = []
+                        chunk_num += 1
+
+    # Process any remaining pairs in the buffer
+    if pair_buffer:
+        sim_vectors_chunk = _process_chunk(pair_buffer, recA_gdf_renamed, recB_gdf_renamed, attr_comp_list, chunk_num)
+        all_sim_vectors_gdf.append(sim_vectors_chunk)
+
+    if not all_sim_vectors_gdf:
         print('  No candidate pairs found after blocking.')
         return cudf.DataFrame()
-    
-    print(f'  Generated {len(pair_list)} candidate record pairs.')
-    sys.stdout.flush()
-
-    all_sim_vectors_gdf = []
-    chunk_size = 1000000  # Process 1 million pairs at a time to manage memory
-
-    recA_gdf_renamed = recA_gdf.add_suffix('_A')
-    recB_gdf_renamed = recB_gdf.add_suffix('_B')
-
-    for i in range(0, len(pair_list), chunk_size):
-        chunk_pairs = pair_list[i:i + chunk_size]
-        
-        pairs_gdf = cudf.DataFrame(chunk_pairs, columns=['rec_id_A', 'rec_id_B'])
-
-        # 2. Join with attribute data
-        merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
-        merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
-
-        # 3. Apply comparisons
-        print(f'  Comparing attribute values for candidate pairs chunk {i//chunk_size + 1} (using native cudf and custom kernels where possible)...')
-        sys.stdout.flush()
-        
-        sim_vectors_list = []
-        
-        for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
-            col_A_name = attr_nameA + '_A'
-            col_B_name = attr_nameB + '_B'
-
-            col_A = merged_gdf[col_A_name].fillna('')
-            col_B = merged_gdf[col_B_name].fillna('')
-
-            if comp_funct == exact_comp:
-                sim_col = (col_A == col_B).astype('float32')
-
-            elif comp_funct == jaccard_comp:
-                print(f"    GPU kernel for: '{comp_funct.__name__}'")
-                sys.stdout.flush()
-                # Generate q-grams for each series on the GPU using .str.ngrams()
-                qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
-                qgrams_A.columns = ['index', 'qgram']
-                qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
-                qgrams_B.columns = ['index', 'qgram']
-                
-                # Drop duplicates to get unique q-grams per record (set behavior)
-                qgrams_A = qgrams_A.drop_duplicates()
-                qgrams_B = qgrams_B.drop_duplicates()
-
-                # Count q-grams per record for union calculation
-                len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
-                len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
-
-                # Calculate intersection size by merging on both index and q-gram
-                intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
-                intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
-
-                # Combine counts into a single DataFrame
-                sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
-                
-                # Calculate union size
-                union_size = sim_df['len_A'] + sim_df['len_B'] - sim_df['intersection_size']
-                
-                # Calculate Jaccard similarity, handle division by zero
-                sim_col = (sim_df['intersection_size'] / union_size).fillna(0)
-
-            elif comp_funct == dice_comp:
-                print(f"    GPU kernel for: '{comp_funct.__name__}'")
-                sys.stdout.flush()
-
-                # Generate q-grams for each series on the GPU using .str.ngrams()
-                qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
-                qgrams_A.columns = ['index', 'qgram']
-                qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
-                qgrams_B.columns = ['index', 'qgram']
-                
-                # Drop duplicates to get unique q-grams per record (set behavior)
-                qgrams_A = qgrams_A.drop_duplicates()
-                qgrams_B = qgrams_B.drop_duplicates()
-
-                # Count q-grams per record
-                len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
-                len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
-
-                # Calculate intersection size
-                intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
-                intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
-
-                # Combine counts into a single DataFrame
-                sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
-                
-                # Calculate sum of lengths for the denominator
-                sum_len = sim_df['len_A'] + sim_df['len_B']
-                
-                # Calculate Dice similarity, handle division by zero
-                sim_col = (2 * sim_df['intersection_size'] / sum_len).fillna(0)
-
-            elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
-                print(f"    GPU kernel for: '{comp_funct.__name__}'")
-                sys.stdout.flush()
-
-                char_to_int = get_char_vocab(col_A, col_B)
-
-                s1_arr = strings_to_char_arrays(col_A, char_to_int)
-                s2_arr = strings_to_char_arrays(col_B, char_to_int)
-
-                d_s1 = cuda.to_device(s1_arr)
-                d_s2 = cuda.to_device(s2_arr)
-                d_out = cuda.device_array(len(col_A), dtype=np.float32)
-
-                threadsperblock = 256
-                blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
-
-                if comp_funct == jaro_winkler_comp:
-                    gpu_jaro_winkler[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
-                else:
-                    gpu_levenshtein[blockspergrid, threadsperblock](d_s1, d_s2, d_out)
-
-                sim_col = cudf.Series(d_out)
-
-            else:
-                print(f"    WARNING: '{comp_funct.__name__}' is not natively supported on GPU. Processing on CPU.")
-                sys.stdout.flush()
-                s_A = col_A.to_pandas()
-                s_B = col_B.to_pandas()
-                sim_list = [comp_funct(v1, v2) for v1, v2 in zip(s_A, s_B)]
-                sim_col = cudf.Series(sim_list, nan_as_null=False)
-
-            sim_vectors_list.append(sim_col)
-
-        # 4. Assemble the final DataFrame for the chunk
-        sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
-        sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
-
-        sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
-        sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
-
-        all_sim_vectors_gdf.append(sim_vectors_gdf)
-            
-        # Clean up memory
-        del pairs_gdf, merged_gdf
-        import gc
-        gc.collect()
 
     final_sim_vectors_gdf = cudf.concat(all_sim_vectors_gdf, ignore_index=True)
 
