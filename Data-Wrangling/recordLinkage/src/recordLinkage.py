@@ -75,19 +75,17 @@ def main():
     # Step 2: Block the datasets
     start_time = time.time()
 
-    # --- First blocking pass: phonetic on names ---
-    logging.info('Running phonetic blocking on names...')
-    phonetic_attrs = ['first_name', 'last_name']
-    recA_dict = recA_gdf.to_pandas().to_dict('index')
-    recB_dict = recB_gdf.to_pandas().to_dict('index')
-    blockA_dict_1 = blocking.phoneticBlocking(recA_dict, phonetic_attrs)
-    blockB_dict_1 = blocking.phoneticBlocking(recB_dict, phonetic_attrs)
+    # --- First blocking pass: simple on state ---
+    logging.info('Running simple blocking on state...')
+    simple_attrs = ['state']
+    blockA_dict_1 = blocking.simpleBlocking(recA_gdf, simple_attrs)
+    blockB_dict_1 = blocking.simpleBlocking(recB_gdf, simple_attrs)
 
-    # --- Second blocking pass: simple on suburb and postcode ---
-    logging.info('Running simple blocking on suburb and postcode...')
-    simple_attrs = ['suburb', 'postcode']
-    blockA_dict_2 = blocking.simpleBlocking(recA_gdf, simple_attrs)
-    blockB_dict_2 = blocking.simpleBlocking(recB_gdf, simple_attrs)
+    # --- Second blocking pass: canopy clustering ---
+    logging.info('Running canopy clustering...')
+    canopy_attrs = ['first_name', 'last_name', 'suburb']
+    blockA_dict_2 = blocking.canopy_clustering(recA_gdf, canopy_attrs, T1=0.6, T2=0.4)
+    blockB_dict_2 = blocking.canopy_clustering(recB_gdf, canopy_attrs, T1=0.6, T2=0.4)
 
     # --- Merge the blocks ---
     logging.info('Merging blocks...')
