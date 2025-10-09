@@ -11,6 +11,7 @@
 import sys
 import cudf
 import cupy
+import numpy as np
 from cuml.ensemble import RandomForestClassifier
 from cuml.model_selection import train_test_split
 def exactClassify(sim_vec_dict):
@@ -252,20 +253,27 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     X_matches = X[match_mask]
     y_matches = y[match_mask]
     
+    import numpy as np
+
     # Get the indices of non-matches without creating a large intermediate dataframe
     non_match_indices = y.index[y == 0]
+    n_non_matches = len(non_match_indices)
 
     # We will use all true matches for training, and sample the non-matches
     n_matches = len(X_matches)
     # Create a larger sample of non-matches to help the classifier learn
-    n_non_match_sample = min(len(non_match_indices), n_matches * 5)
+    n_non_match_sample = min(n_non_matches, n_matches * 5)
 
     print(f'  Creating a training sample with all {n_matches} matches and' + \
           f' {n_non_match_sample} non-matches.')
     sys.stdout.flush()
 
-    # Randomly sample the *indices* of the non-matches
-    sampled_non_match_indices = non_match_indices.to_series().sample(n=n_non_match_sample, random_state=42)
+    # Use numpy on CPU to generate random indices to avoid large GPU allocations
+    cpu_random_indices = np.random.choice(n_non_matches, size=n_non_match_sample, replace=False)
+    gpu_random_indices = cudf.Series(cpu_random_indices)
+
+    # Use .take() to gather the sample using the generated indices
+    sampled_non_match_indices = non_match_indices.take(gpu_random_indices)
 
     # Use the sampled indices to gather the non-match sample
     X_non_match_sample = X.loc[sampled_non_match_indices]
