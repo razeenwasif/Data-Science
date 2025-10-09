@@ -19,9 +19,9 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 # =============================================================================
 def main():
     # Variable names for loading datasets
-    datasetA_name = 'datasets/clean-A-10000.csv'
-    datasetB_name = 'datasets/clean-B-10000.csv'
-    truthfile_name = 'datasets/clean-true-matches-10000.csv'
+    datasetA_name = 'datasets/little-dirty-A-1000.csv'
+    datasetB_name = 'datasets/little-dirty-B-1000.csv'
+    truthfile_name = 'datasets/little-dirty-true-matches-1000.csv'
 
     # The list of tuples (comparison function, attribute name in record A,
     # attribute name in record B)
@@ -97,7 +97,7 @@ def main():
 
     # -----------------------------------------------------------------------------
     # Step 6: Save the linkage result
-    saveLinkResult.save_linkage_set('matches.csv', class_match_set)
+    saveLinkResult.save_linkage_set('./out/matches.csv', class_match_set)
 
 if __name__ == "__main__":
     main()

@@ -9,8 +9,8 @@ import comparison
 import numpy as np
 import cudf
 import faiss
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import normalize
+from cuml.feature_extraction.text import TfidfVectorizer
+from cuml.preprocessing import normalize
 
 # =============================================================================
 
@@ -329,10 +329,9 @@ def _vectorize_for_faiss_tfidf(gdf, blk_attr_list):
 
     # Use TfidfVectorizer to create vectors from q-grams
     vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 2))
-    vectors = vectorizer.fit_transform(gdf['combined_attrs'].to_arrow().to_pylist())
+    vectors = vectorizer.fit_transform(gdf['combined_attrs'])
 
-    # L2 normalize the vectors for cosine similarity
-    vectors = normalize(vectors, norm='l2', axis=1).toarray().astype('float32')
+    vectors = normalize(vectors, norm='l2', axis=1).astype('float32')
 
     return vectors
 
@@ -367,6 +366,10 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     print(f"  Vectorized {num_records} records into vectors of dimension {dim}.")
     sys.stdout.flush()
 
+    # L2 normalize the vectors for cosine similarity and convert to NumPy
+    vectors = normalize(vectors, norm='l2', axis=1).toarray().astype('float32')
+    vectors_np = vectors.get() # Convert to NumPy array for Faiss CPU ops
+
     # Build Faiss index for L2 distance using IndexIVFFlat for GPU support
     nlist = int(np.sqrt(num_records))
     quantizer = faiss.IndexFlatL2(dim)
@@ -375,12 +378,12 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     # Train the index
     print("  Training Faiss index...")
     sys.stdout.flush()
-    index.train(vectors)
+    index.train(vectors_np)
 
     # Move index to GPU
     res = faiss.StandardGpuResources()
     gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
-    gpu_index.add(vectors)
+    gpu_index.add(vectors_np)
     gpu_index.nprobe = 10  # Number of cells to visit for search
 
     print(f"  Built and trained Faiss index on GPU with {nlist} cells.")
@@ -409,7 +412,7 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
             next_progress += progress_step
 
         center_index = random.choice(list(unassigned_rec_indices))
-        center_vector = np.array([vectors[center_index, :]], dtype='float32')
+        center_vector = np.array([vectors_np[center_index, :]], dtype='float32')
 
         # Use knn search and filter by radius to simulate range search
         # Set k to a reasonably large number. Capping at 2048 which is a common limit.
