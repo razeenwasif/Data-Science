@@ -106,7 +106,7 @@ def phoneticBlocking(rec_dict, blk_attr_list):
       # *********** Implement Soundex function here *********
 
       # Add your code here
-      if attr_val == '':
+      if attr_val == '' or attr_val is None:
         rec_bkv += 'z000'  # Often used as Soundex code for empty values
       else: 
         attr_val = attr_val.lower()
@@ -260,7 +260,7 @@ def slkBlocking(rec_dict, fam_name_attr_ind, giv_name_attr_ind,
     # Get date of birth
     # 
     dob = rec_values[dob_attr_ind]
-    if dob == '':
+    if not dob:
         dob = '01/01/1900'
 
     dob_list = dob.split('/')
@@ -280,7 +280,8 @@ def slkBlocking(rec_dict, fam_name_attr_ind, giv_name_attr_ind,
 
     # Get gender
     # 
-    gender = rec_values[gender_attr_ind].lower()
+    gender_val = rec_values[gender_attr_ind]
+    gender = gender_val.lower() if gender_val else ''
 
     if gender == 'm':
         rec_bkv += '1'
