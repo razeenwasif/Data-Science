@@ -207,7 +207,7 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
+def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     """A classifier method based on a supervised machine learning technique
      (random forest) which learns from the given similarity vectors and the
      true match status set provided.
@@ -220,9 +220,8 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
         (match or non-match).
 
      Parameter Description:
-       sim_vec_dict   : Dictionary of record pairs with their identifiers as
-                        keys and their corresponding similarity vectors as
-                        values.
+       sim_vectors_gdf : A cuDF DataFrame with record pairs and their similarity
+                         vectors.
        true_match_set : Set of true matches (record identifier pairs)
        n_estimators   : The number of trees in the forest.
   """
@@ -231,18 +230,20 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
     class_nonmatch_set = set()
 
     print('Supervised random forest classification of %d record pairs' % \
-        (len(sim_vec_dict)))
+        (len(sim_vectors_gdf)))
     sys.stdout.flush()
 
-    rec_pairs = list(sim_vec_dict.keys())
-    X = cudf.DataFrame(list(sim_vec_dict.values()))
+    rec_pairs = sim_vectors_gdf[['rec_id_A', 'rec_id_B']]
+    X = sim_vectors_gdf.drop(columns=['rec_id_A', 'rec_id_B'])
     X = X.fillna(0.0)
     
     # Vectorized label creation using isin for efficient lookup
     #
-    rec_pairs_series = cudf.Series(rec_pairs)
-    true_match_series = cudf.Series(list(true_match_set))
-    y = rec_pairs_series.isin(true_match_series).astype('int32')
+    true_match_df = cudf.DataFrame(list(true_match_set), columns=['rec_id_A', 'rec_id_B'])
+    true_match_df['label'] = 1
+
+    labeled_pairs = rec_pairs.merge(true_match_df, on=['rec_id_A', 'rec_id_B'], how='left')
+    y = labeled_pairs['label'].fillna(0).astype('int32')
 
 
     # Split data into training and testing sets
@@ -272,11 +273,11 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
     predictions_series = cudf.Series(predictions)
     match_mask = predictions_series == 1
 
-    match_pairs = rec_pairs_series[match_mask]
-    non_match_pairs = rec_pairs_series[~match_mask]
+    match_pairs = rec_pairs[match_mask]
+    non_match_pairs = rec_pairs[~match_mask]
 
-    class_match_set = set(map(tuple, match_pairs.to_arrow().to_pylist()))
-    class_nonmatch_set = set(map(tuple, non_match_pairs.to_arrow().to_pylist()))
+    class_match_set = set(map(tuple, match_pairs.to_pandas().to_records(index=False)))
+    class_nonmatch_set = set(map(tuple, non_match_pairs.to_pandas().to_records(index=False)))
 
     print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))

@@ -54,7 +54,7 @@ def load_data_set(file_name, rec_id_col_name, use_attr_list):
 
     rec_dict = gdf.to_pandas().to_dict('index')
 
-    return rec_dict
+    return gdf
 
 def load_truth_data(file_name):
   """Load a truth data file where each line contains two record identifiers

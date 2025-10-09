@@ -357,6 +357,10 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     print("Running optimized canopy clustering with Faiss (GPU knn search)...")
     sys.stdout.flush()
 
+    if gdf.empty:
+        print("  Input DataFrame is empty. Returning empty block dictionary.")
+        return {}
+
     block_dict = {}
     
     # Vectorize the records using TF-IDF
@@ -454,6 +458,19 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     sys.stdout.flush()
 
     return block_dict
+# -----------------------------------------------------------------------------
+
+
+def merge_block_dicts(dict1, dict2):
+    """Merges two block dictionaries."""
+    merged_dict = dict1.copy()
+    for key, value in dict2.items():
+        if key in merged_dict:
+            # Use a set to handle duplicates efficiently
+            merged_dict[key] = list(set(merged_dict[key] + value))
+        else:
+            merged_dict[key] = value
+    return merged_dict
 # -----------------------------------------------------------------------------
 
 def printBlockStatistics(blockA_dict, blockB_dict):

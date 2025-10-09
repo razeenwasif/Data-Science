@@ -16,19 +16,18 @@ MAX_STRING_LEN = 256
 
 @cuda.jit
 def gpu_jaro_winkler(s1, s2, out):
+    """Numba CUDA kernel to compute Jaro-Winkler similarity for two series of strings."""
     i = cuda.grid(1)
     if i < s1.shape[0]:
         out[i] = jaro_winkler_similarity_kernel(s1[i], s2[i])
 
 @cuda.jit
 def gpu_levenshtein(s1, s2, out):
-    i = cuda.grid(1)
-    if i < s1.shape[0]:
-        out[i] = levenshtein_similarity_kernel(s1[i], s2[i])
+    """Numba CUDA kernel to compute Levenshtein similarity for two series of strings."""
 
 
 def get_char_vocab(s1, s2):
-    """Create a character vocabulary from two series of strings."""
+    """Create a character vocabulary (char-to-int mapping) from two series of strings."""
     chars = set()
     for s in s1.to_pandas():
         chars.update(s)
@@ -38,7 +37,7 @@ def get_char_vocab(s1, s2):
     return char_to_int
 
 def strings_to_char_arrays(s, char_to_int):
-    """Convert a series of strings to a 2D numpy array of character indices."""
+    """Convert a series of strings to a 2D NumPy array of character indices."""
     num_strings = len(s)
     char_arrays = np.zeros((num_strings, MAX_STRING_LEN), dtype=np.int32)
     for i, string in enumerate(s.to_pandas()):
@@ -150,6 +149,7 @@ from comparison_kernels import compare_kernel
 Q = 2	# Value length of q-grams for Jaccard and Dice comparison function
 
 def get_q_grams(s, q):
+	"""Generate a set of q-grams (substrings of length q) from a string."""
 	return {s[i:i+q] for i in range(len(s) - q + 1)}
 
 # =============================================================================
@@ -531,13 +531,13 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
 
     if not pair_list:
         print('  No candidate pairs found after blocking.')
-        return {}
+        return cudf.DataFrame()
     
     print(f'  Generated {len(pair_list)} candidate record pairs.')
     sys.stdout.flush()
 
-    sim_vec_dict = {}
-    chunk_size = 5000000  # Process 5 million pairs at a time to manage memory
+    all_sim_vectors_gdf = []
+    chunk_size = 1000000  # Process 1 million pairs at a time to manage memory
 
     recA_gdf_renamed = recA_gdf.add_suffix('_A')
     recB_gdf_renamed = recB_gdf.add_suffix('_B')
@@ -661,27 +661,27 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
 
             sim_vectors_list.append(sim_col)
 
-        # 4. Assemble the final dictionary for the chunk
+        # 4. Assemble the final DataFrame for the chunk
         sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
         sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
 
         sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
         sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
 
-        for row in sim_vectors_gdf.to_pandas().itertuples(index=False):
-            key = (row.rec_id_A, row.rec_id_B)
-            sim_vec_dict[key] = list(row)[:-2]
+        all_sim_vectors_gdf.append(sim_vectors_gdf)
             
         # Clean up memory
-        del pairs_gdf, merged_gdf, sim_vectors_gdf
+        del pairs_gdf, merged_gdf
         import gc
         gc.collect()
 
-    print(f'  Compared {len(sim_vec_dict)} record pairs')
+    final_sim_vectors_gdf = cudf.concat(all_sim_vectors_gdf, ignore_index=True)
+
+    print(f'  Compared {len(final_sim_vectors_gdf)} record pairs')
     print('')
     sys.stdout.flush()
 
-    return sim_vec_dict
+    return final_sim_vectors_gdf
 # -----------------------------------------------------------------------------
 
 # End of program.
