@@ -245,9 +245,34 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     labeled_pairs = rec_pairs.merge(true_match_df, on=['rec_id_A', 'rec_id_B'], how='left')
     y = labeled_pairs['label'].fillna(0).astype('int32')
 
+    # --- Create a smaller, balanced sample for training to avoid memory issues ---
+    
+    # Separate true matches and non-matches from the full dataset
+    match_mask = (y == 1)
+    X_matches = X[match_mask]
+    y_matches = y[match_mask]
+    
+    X_non_matches = X[~match_mask]
 
-    # Split data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33,\
+    # We will use all true matches for training, and sample the non-matches
+    n_matches = len(X_matches)
+    # Create a larger sample of non-matches to help the classifier learn
+    n_non_match_sample = min(len(X_non_matches), n_matches * 5)
+
+    print(f'  Creating a training sample with all {n_matches} matches and' + \
+          f' {n_non_match_sample} non-matches.')
+    sys.stdout.flush()
+
+    X_non_match_sample = X_non_matches.sample(n=n_non_match_sample, random_state=42)
+    y_non_match_sample = y.loc[X_non_match_sample.index]
+
+    # Combine to form the final sampled dataset for training/testing
+    X_sampled = cudf.concat([X_matches, X_non_match_sample])
+    y_sampled = cudf.concat([y_matches, y_non_match_sample])
+
+    # Split the SMALLER, SAMPLED dataset into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X_sampled, y_sampled, \
+                                                    test_size=0.33, \
                                                     random_state=42)
 
     print('  Number of training records: %d' % len(X_train))
@@ -259,9 +284,9 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     clf = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
     clf.fit(X_train, y_train)
 
-    # Evaluate the classifier
+    # Evaluate the classifier on the sampled test set
     accuracy = clf.score(X_test, y_test)
-    print('  Classifier accuracy: %.3f' % accuracy)
+    print('  Classifier accuracy on sampled test set: %.3f' % accuracy)
     print('')
     sys.stdout.flush()
 
