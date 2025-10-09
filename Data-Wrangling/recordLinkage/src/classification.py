@@ -247,24 +247,29 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
 
     # --- Create a smaller, balanced sample for training to avoid memory issues ---
     
-    # Separate true matches and non-matches from the full dataset
+    # Get all true matches (these are few, so this is fine)
     match_mask = (y == 1)
     X_matches = X[match_mask]
     y_matches = y[match_mask]
     
-    X_non_matches = X[~match_mask]
+    # Get the indices of non-matches without creating a large intermediate dataframe
+    non_match_indices = y.index[y == 0]
 
     # We will use all true matches for training, and sample the non-matches
     n_matches = len(X_matches)
     # Create a larger sample of non-matches to help the classifier learn
-    n_non_match_sample = min(len(X_non_matches), n_matches * 5)
+    n_non_match_sample = min(len(non_match_indices), n_matches * 5)
 
     print(f'  Creating a training sample with all {n_matches} matches and' + \
           f' {n_non_match_sample} non-matches.')
     sys.stdout.flush()
 
-    X_non_match_sample = X_non_matches.sample(n=n_non_match_sample, random_state=42)
-    y_non_match_sample = y.loc[X_non_match_sample.index]
+    # Randomly sample the *indices* of the non-matches
+    sampled_non_match_indices = non_match_indices.to_series().sample(n=n_non_match_sample, random_state=42)
+
+    # Use the sampled indices to gather the non-match sample
+    X_non_match_sample = X.loc[sampled_non_match_indices]
+    y_non_match_sample = y.loc[sampled_non_match_indices]
 
     # Combine to form the final sampled dataset for training/testing
     X_sampled = cudf.concat([X_matches, X_non_match_sample])
