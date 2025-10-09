@@ -236,6 +236,7 @@ def supervisedMLClassify(sim_vec_dict, true_match_set, n_estimators=5):
 
     rec_pairs = list(sim_vec_dict.keys())
     X = cudf.DataFrame(list(sim_vec_dict.values()))
+    X = X.fillna(0.0)
     
     # Vectorized label creation using isin for efficient lookup
     #

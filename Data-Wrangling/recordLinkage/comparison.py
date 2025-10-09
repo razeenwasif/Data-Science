@@ -567,21 +567,63 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
             if comp_funct == exact_comp:
                 sim_col = (col_A == col_B).astype('float32')
 
-            elif comp_funct == jaccard_comp:
-                print(f"    GPU kernel for: '{comp_funct.__name__}'")
-                sys.stdout.flush()
-                sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
-                sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
-                sim_array = calculate_jaccard_similarity_gpu_pairwise(sets_A, sets_B)
-                sim_col = cudf.Series(sim_array)
+                # Generate q-grams for each series on the GPU using .str.ngrams()
+                qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
+                qgrams_A.columns = ['index', 'qgram']
+                qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
+                qgrams_B.columns = ['index', 'qgram']
+                
+                # Drop duplicates to get unique q-grams per record (set behavior)
+                qgrams_A = qgrams_A.drop_duplicates()
+                qgrams_B = qgrams_B.drop_duplicates()
+
+                # Count q-grams per record for union calculation
+                len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
+                len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
+
+                # Calculate intersection size by merging on both index and q-gram
+                intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
+                intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
+
+                # Combine counts into a single DataFrame
+                sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
+                
+                # Calculate union size
+                union_size = sim_df['len_A'] + sim_df['len_B'] - sim_df['intersection_size']
+                
+                # Calculate Jaccard similarity, handle division by zero
+                sim_col = (sim_df['intersection_size'] / union_size).fillna(0)
 
             elif comp_funct == dice_comp:
                 print(f"    GPU kernel for: '{comp_funct.__name__}'")
                 sys.stdout.flush()
-                sets_A = col_A.to_pandas().apply(get_q_grams_set).tolist()
-                sets_B = col_B.to_pandas().apply(get_q_grams_set).tolist()
-                sim_array = calculate_dice_similarity_gpu_pairwise(sets_A, sets_B)
-                sim_col = cudf.Series(sim_array)
+
+                # Generate q-grams for each series on the GPU using .str.ngrams()
+                qgrams_A = col_A.str.ngrams(n=Q).explode().reset_index()
+                qgrams_A.columns = ['index', 'qgram']
+                qgrams_B = col_B.str.ngrams(n=Q).explode().reset_index()
+                qgrams_B.columns = ['index', 'qgram']
+                
+                # Drop duplicates to get unique q-grams per record (set behavior)
+                qgrams_A = qgrams_A.drop_duplicates()
+                qgrams_B = qgrams_B.drop_duplicates()
+
+                # Count q-grams per record
+                len_A = qgrams_A.groupby('index')['qgram'].count().rename('len_A')
+                len_B = qgrams_B.groupby('index')['qgram'].count().rename('len_B')
+
+                # Calculate intersection size
+                intersection = qgrams_A.merge(qgrams_B, on=['index', 'qgram'], how='inner')
+                intersection_size = intersection.groupby('index')['qgram'].count().rename('intersection_size')
+
+                # Combine counts into a single DataFrame
+                sim_df = cudf.concat([len_A, len_B, intersection_size], axis=1).fillna(0)
+                
+                # Calculate sum of lengths for the denominator
+                sum_len = sim_df['len_A'] + sim_df['len_B']
+                
+                # Calculate Dice similarity, handle division by zero
+                sim_col = (2 * sim_df['intersection_size'] / sum_len).fillna(0)
 
             elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
                 print(f"    GPU kernel for: '{comp_funct.__name__}'")
