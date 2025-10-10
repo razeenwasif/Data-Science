@@ -309,14 +309,27 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     # Classify all record pairs in batches to avoid OOM on predict
     chunk_size = 1_000_000  # Tunable parameter
     predictions_list = []
+    max_match_proba = 0.0 # DEBUG: Track max match probability
     print(f'  Predicting on {len(X)} pairs in {((len(X)-1)//chunk_size)+1} chunks of size {chunk_size}...')
     sys.stdout.flush()
     for i in range(0, len(X), chunk_size):
         chunk = X.iloc[i:i + chunk_size]
-        chunk_predictions = clf.predict(chunk)
+        # Get probabilities, not just hard predictions
+        chunk_probas = clf.predict_proba(chunk)
+        
+        # Keep track of the highest match probability found
+        if len(chunk_probas) > 0:
+            max_match_proba = max(max_match_proba, chunk_probas[:, 1].max())
+
+        # Get hard predictions based on 0.5 threshold for downstream logic
+        chunk_predictions = (chunk_probas[:, 1] >= 0.5).astype('int32')
         predictions_list.append(chunk_predictions)
     
     predictions = cupy.concatenate(predictions_list)
+
+    # --- DEBUG: Print the max probability ---
+    print(f'  DEBUG: Maximum match probability found across all pairs: {max_match_proba:.4f}')
+    sys.stdout.flush()
 
     # --- Memory Cleanup ---
     # Explicitly delete large objects that are no longer needed to free up GPU memory.

@@ -552,12 +552,6 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
     merged_gdf = pairs_gdf.merge(chunk_recA_gdf, left_on='rec_id_A', right_index=True, how='left')
     merged_gdf = merged_gdf.merge(chunk_recB_gdf, left_on='rec_id_B', right_index=True, how='left')
 
-    # --- DEBUG: Print head of merged_gdf to inspect attribute join ---
-    if chunk_num == 1: # Only print for the first chunk
-        print("DEBUG: Inspecting merged_gdf head for the first chunk:")
-        print(merged_gdf.head())
-    # --- END DEBUG ---
-
     # 4. Apply comparisons
     print(f'  Comparing attribute values for candidate pairs chunk {chunk_num} (using native cudf and custom kernels where possible)...')
     sys.stdout.flush()

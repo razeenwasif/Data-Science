@@ -51,11 +51,10 @@ def main():
 
     # The list of tuples (comparison function, attribute name in record A,
     # attribute name in record B)
-    # DEBUG: Temporarily removed jaro_winkler and edit_dist to isolate bug
     approx_comp_funct_list = [(comparison.jaccard_comp, 'first_name', 'first_name'),
                               (comparison.dice_comp, 'middle_name', 'middle_name'),
-                              # (comparison.jaro_winkler_comp, 'last_name', 'last_name'),
-                              # (comparison.edit_dist_sim_comp, 'suburb', 'suburb'),
+                              (comparison.jaro_winkler_comp, 'last_name', 'last_name'),
+                              (comparison.edit_dist_sim_comp, 'suburb', 'suburb'),
                               (comparison.exact_comp, 'state', 'state'),
                              ]
 
