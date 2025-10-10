@@ -483,9 +483,26 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     if recA_gdf.empty or recB_gdf.empty:
         return cudf.DataFrame({'rec_id_A': [], 'rec_id_B': []})
 
-    # Step 1: Vectorize both datasets
-    vectors_A = _vectorize_for_faiss_tfidf(recA_gdf.copy(), blk_attr_list)
-    vectors_B = _vectorize_for_faiss_tfidf(recB_gdf.copy(), blk_attr_list)
+    # Step 1: Vectorize both datasets using a shared vocabulary
+    # Combine attributes into a single string per record for both GDFs
+    recA_gdf['combined_attrs'] = ''
+    recB_gdf['combined_attrs'] = ''
+    for col in blk_attr_list:
+        recA_gdf['combined_attrs'] = recA_gdf['combined_attrs'] + recA_gdf[col].fillna('').astype(str).str.lower() + ' '
+        recB_gdf['combined_attrs'] = recB_gdf['combined_attrs'] + recB_gdf[col].fillna('').astype(str).str.lower() + ' '
+
+    # Fit the vectorizer on the combined text from both datasets to create a shared vocabulary
+    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 2))
+    vectorizer.fit(cudf.concat([recA_gdf['combined_attrs'], recB_gdf['combined_attrs']]))
+
+    # Transform each dataset separately using the shared vocabulary
+    vectors_A = vectorizer.transform(recA_gdf['combined_attrs'])
+    vectors_B = vectorizer.transform(recB_gdf['combined_attrs'])
+
+    # Normalize the vectors
+    vectors_A = normalize(vectors_A, norm='l2', axis=1).astype('float32')
+    vectors_B = normalize(vectors_B, norm='l2', axis=1).astype('float32')
+
     dim = vectors_A.shape[1]
 
     vectors_A_np = vectors_A.toarray().get() # to NumPy for Faiss
