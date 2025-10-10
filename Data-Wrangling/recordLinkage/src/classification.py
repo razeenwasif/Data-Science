@@ -332,7 +332,6 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     # Vectorized result collection in chunks to avoid OOM
     #
     predictions_series = cudf.Series(predictions)
-    match_mask = (predictions_series == 1)
 
     chunk_size = 1_000_000
     class_match_set = set()
@@ -343,7 +342,8 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
 
     for i in range(0, len(rec_pairs), chunk_size):
         rec_pairs_chunk = rec_pairs.iloc[i:i + chunk_size]
-        mask_chunk = match_mask.iloc[i:i + chunk_size]
+        predictions_chunk = predictions_series.iloc[i:i + chunk_size]
+        mask_chunk = (predictions_chunk == 1)
 
         match_pairs_chunk = rec_pairs_chunk[mask_chunk]
         if not match_pairs_chunk.empty:
