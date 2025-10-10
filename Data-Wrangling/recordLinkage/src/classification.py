@@ -208,17 +208,12 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, threshold=0.1):
+def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, threshold=0.4):
     """A classifier method based on a supervised machine learning technique
      (random forest) which learns from the given similarity vectors and the
      true match status set provided.
 
-     The approach works as follows:
-     1) Create the matrix of features (similarity vectors) and class labels
-        (true matches and true non-matches)
-     2) Train a random forest classifier on the training data.
-     3) For each record pair and its similarity vector, predict its class
-        (match or non-match).
+     Improved to handle class imbalance with multiple strategies.
 
      Parameter Description:
        sim_vectors_gdf : A cuDF DataFrame with record pairs and their similarity
@@ -247,9 +242,8 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     labeled_pairs = rec_pairs.merge(true_match_df, on=['rec_id_A', 'rec_id_B'], how='left')
     y = labeled_pairs['label'].fillna(0).astype('int32')
 
-    # --- Create a smaller, balanced sample for training to avoid memory issues ---
+    # --- Create a training sample with improved class balance ---
 
-    # Get all true matches (these are few, so this is fine)
     match_mask = (y == 1)
     X_matches = X[match_mask]
     y_matches = y[match_mask]
@@ -258,9 +252,12 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     print(f'  Total true matches in dataset: {n_matches}')
     print(f'  Total non-matches in dataset: {len(y) - n_matches}')
 
-    # Efficiently sample non-matches to avoid out-of-memory errors
+    # Strategy 1: Balance training data more carefully
+    # Use a 1:1 or 1:2 ratio instead of 1:5
     n_total = len(y)
     n_non_matches = n_total - n_matches
+    
+    # Try a 1:2 ratio (2 non-matches per match) for better balance
     n_non_match_sample = min(n_non_matches, n_matches * 2)
 
     print(f'  Creating a training sample with all {n_matches} matches and' + \
@@ -268,29 +265,22 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     sys.stdout.flush()
 
     if n_non_match_sample > 0:
-        # Efficiently sample non-matches directly on the GPU
-        # 1. Get the original indices of all non-matches
         non_match_indices_gpu = y[y == 0].index.to_series()
-        
-        # 2. Use cuDF's native sampling to select non-matches
         sampled_non_match_indices = non_match_indices_gpu.sample(n=n_non_match_sample, replace=False)
 
-        # 3. Gather the sampled data
         X_non_match_sample = X.take(sampled_non_match_indices)
         y_non_match_sample = y.take(sampled_non_match_indices)
 
         print(f'  Actually using {len(X_non_match_sample)} non-matches for training.')
         sys.stdout.flush()
 
-        # Combine to form the final sampled dataset for training/testing
         X_sampled = cudf.concat([X_matches, X_non_match_sample])
         y_sampled = cudf.concat([y_matches, y_non_match_sample])
     else:
-        # Handle case with no non-matches to sample
         X_sampled = X_matches
         y_sampled = y_matches
 
-    # Split the SMALLER, SAMPLED dataset into training and testing sets
+    # Split the sampled dataset into training and testing sets
     X_train, X_test, y_train, y_test = train_test_split(X_sampled, y_sampled, \
                                                     test_size=0.33, \
                                                     random_state=42)
@@ -299,36 +289,15 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     print('  Number of testing records: %d' % len(X_test))
     print('')
     sys.stdout.flush()
-    
-    # Strategy 2: cuML doesn't support class_weight, so use data-level balancing 
+
+    # Strategy 2: cuML doesn't support class_weight, so use data-level balancing instead
     # Ensure training data is well-balanced by further adjusting non-match sampling
     # Also use hyperparameters to reduce overfitting to the majority class
-    # Recalculate training set balance - make it closer to 1:1
-    n_train_matches = (y_train == 1).sum()
-    n_train_non_matches = (y_train == 0).sum()
-
-    # If imbalanced, upsample matches to create better balance
-    if n_train_matches < n_train_non_matches * 0.4:
-        # Upsample matches by randomly repeating them
-        match_indices = (y_train == 1).nonzero()[0]
-        non_match_indices = (y_train == 0).nonzero()[0]
-        
-        # Sample non-matches to match the count of matches (1:1 ratio)
-        target_non_match_count = int(n_train_matches * 1.5)  # 1:1.5 ratio
-        if target_non_match_count < len(non_match_indices):
-            sampled_non_match_indices = cupy.random.choice(
-                non_match_indices, 
-                size=target_non_match_count, 
-                replace=False
-            )
-        else:
-            sampled_non_match_indices = non_match_indices
-        
-        balanced_indices = cupy.concatenate([match_indices, sampled_non_match_indices])
-        X_train = X_train.take(balanced_indices)
-        y_train = y_train.take(balanced_indices)
-
-    # Initialize and train the classifier
+    
+    # No additional rebalancing needed - the initial sampling should be sufficient
+    # The key is to use a reasonable probability threshold, not class rebalancing
+    print(f'  Training set composition: {(y_train == 1).sum()} matches, {(y_train == 0).sum()} non-matches')
+    
     clf = RandomForestClassifier(
         n_estimators=n_estimators, 
         random_state=42,
@@ -344,23 +313,44 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     print('')
     sys.stdout.flush()
 
-    # Classify all record pairs in batches to avoid OOM on predict
-    chunk_size = 1_000_000  # Tunable parameter
-    predictions_list = []
-    print(f'  Predicting on {len(X)} pairs in {((len(X)-1)//chunk_size)+1} chunks of size {chunk_size}...')
+    # First pass: collect probability predictions to analyze distribution
+    chunk_size = 1_000_000
+    probas_list = []
+    print(f'  Predicting probabilities on {len(X)} pairs in {((len(X)-1)//chunk_size)+1} chunks of size {chunk_size}...')
     sys.stdout.flush()
+    
     for i in range(0, len(X), chunk_size):
         chunk = X.iloc[i:i + chunk_size]
         chunk_probas = clf.predict_proba(chunk)
+        # Store only the positive class probability
+        probas_list.append(chunk_probas[:, 1])
 
-        # Get hard predictions based on the provided threshold
-        chunk_predictions = (chunk_probas[1] >= threshold).astype('int32')
-        predictions_list.append(chunk_predictions)
-
-    predictions = cupy.concatenate(predictions_list)
+    probas_all = cupy.concatenate(probas_list)
+    
+    # Analyze probability distribution to choose optimal threshold
+    probas_np = cupy.asnumpy(probas_all)
+    percentiles = np.percentile(probas_np, [50, 75, 90, 95, 99])
+    print(f'  Probability distribution - 50th: {percentiles[0]:.3f}, 75th: {percentiles[1]:.3f}, ' + 
+          f'90th: {percentiles[2]:.3f}, 95th: {percentiles[3]:.3f}, 99th: {percentiles[4]:.3f}')
+    
+    # Use a dynamic threshold based on percentiles
+    # For matching, we want high precision, so use a conservative threshold
+    # If most pairs have high probability, use a higher percentile threshold
+    if percentiles[4] < 0.5:  # 99th percentile is low
+        dynamic_threshold = percentiles[4]  # Use 99th percentile
+    elif percentiles[3] < 0.5:  # 95th percentile is low
+        dynamic_threshold = percentiles[3]  # Use 95th percentile
+    else:  # Most scores are high, use provided threshold or be very conservative
+        dynamic_threshold = max(threshold, 0.5)
+    
+    print(f'  Using dynamic threshold: {dynamic_threshold:.3f} (provided threshold was {threshold:.3f})')
+    print('')
+    sys.stdout.flush()
+    
+    # Second pass: apply threshold to get predictions
+    predictions = (probas_all >= dynamic_threshold).astype('int32')
 
     # --- Memory Cleanup ---
-    # Explicitly delete large objects that are no longer needed to free up GPU memory.
     print('  Cleaning up memory before final result collection...')
     sys.stdout.flush()
     del predictions_list
@@ -373,7 +363,6 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     gc.collect()
     
     # Vectorized result collection in chunks to avoid OOM
-    #
     predictions_series = cudf.Series(predictions)
 
     chunk_size = 1_000_000
