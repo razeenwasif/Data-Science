@@ -323,7 +323,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
         chunk = X.iloc[i:i + chunk_size]
         chunk_probas = clf.predict_proba(chunk)
         # Store only the positive class probability
-        probas_list.append(chunk_probas[:, 1])
+        probas_list.append(chunk_probas.iloc[:, 1])
 
     probas_all = cupy.concatenate(probas_list)
     
@@ -353,7 +353,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
     # --- Memory Cleanup ---
     print('  Cleaning up memory before final result collection...')
     sys.stdout.flush()
-    del predictions_list
+    del probas_list
     del X
     del clf
     del X_sampled, y_sampled, X_train, y_train, X_test, y_test
