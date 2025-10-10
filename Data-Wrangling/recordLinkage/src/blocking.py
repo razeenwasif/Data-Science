@@ -543,9 +543,12 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     pairs_A = pairs_A[dist_mask]
     pairs_B_indices = pairs_B_indices[dist_mask]
 
+    # Convert the numpy array of indices to a cupy array before passing to take()
+    pairs_B_indices_gpu = cupy.asarray(pairs_B_indices)
+
     candidate_pairs_gdf = cudf.DataFrame({
         'rec_id_A': rec_ids_A_series.take(cupy.ascontiguousarray(pairs_A)),
-        'rec_id_B': rec_ids_B_series.take(cupy.ascontiguousarray(pairs_B_indices))
+        'rec_id_B': rec_ids_B_series.take(pairs_B_indices_gpu)
     })
     
     print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
