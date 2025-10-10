@@ -526,8 +526,8 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     distances, indices = gpu_index.search(vectors_A_np, k)
 
     # Step 4: Process results to create candidate pairs
-    rec_ids_A = recA_gdf.index.to_cupy()
-    rec_ids_B = recB_gdf.index.to_cupy()
+    rec_ids_A_series = recA_gdf.index.to_series()
+    rec_ids_B_series = recB_gdf.index.to_series()
 
     pairs_A = cupy.repeat(cupy.arange(len(recA_gdf)), k)
     pairs_B_indices = indices.flatten()
@@ -543,8 +543,8 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     pairs_B_indices = pairs_B_indices[dist_mask]
 
     candidate_pairs_gdf = cudf.DataFrame({
-        'rec_id_A': rec_ids_A[pairs_A],
-        'rec_id_B': rec_ids_B[pairs_B_indices]
+        'rec_id_A': rec_ids_A_series.take(cupy.ascontiguousarray(pairs_A)),
+        'rec_id_B': rec_ids_B_series.take(cupy.ascontiguousarray(pairs_B_indices))
     })
     
     print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
