@@ -43,12 +43,13 @@ def strings_to_char_arrays_gpu(s, char_to_int_map, max_len=256):
     """Convert a series of strings to a 2D CuPy array of character indices, fully on GPU."""
     num_strings = len(s)
     
+    # Tokenize to get a series with original record index and character value
     token_series = s.str.character_tokenize()
-    tokens = cudf.DataFrame({
-        'rec_index': token_series.index.get_level_values(0),
-        'char_pos': token_series.index.get_level_values(1),
-        'char': token_series.values
-    })
+    tokens = token_series.reset_index()
+    tokens.columns = ['rec_index', 'char']
+
+    # Generate the character position within each record
+    tokens['char_pos'] = tokens.groupby('rec_index').cumcount()
     
     tokens = tokens[tokens.char_pos < max_len]
     
