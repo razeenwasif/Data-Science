@@ -328,6 +328,19 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
         predictions_list.append(chunk_predictions)
     
     predictions = cupy.concatenate(predictions_list)
+
+    # --- Memory Cleanup ---
+    # Explicitly delete large objects that are no longer needed to free up GPU memory.
+    print('  Cleaning up memory before final result collection...')
+    sys.stdout.flush()
+    del predictions_list
+    del X
+    del clf
+    del X_sampled, y_sampled, X_train, y_train, X_test, y_test
+    del X_matches, y_matches, X_non_match_sample, y_non_match_sample
+    del y
+    import gc
+    gc.collect()
     
     # Vectorized result collection in chunks to avoid OOM
     #
