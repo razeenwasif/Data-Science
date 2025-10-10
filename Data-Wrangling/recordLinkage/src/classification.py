@@ -300,13 +300,38 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     print('')
     sys.stdout.flush()
     
-    # Strategy 2: Use class_weight to penalize misclassification of matches
-    # This makes the classifier more sensitive to minority class (matches)
+    # Strategy 2: cuML doesn't support class_weight, so use data-level balancing 
+    # Ensure training data is well-balanced by further adjusting non-match sampling
+    # Also use hyperparameters to reduce overfitting to the majority class
+    # Recalculate training set balance - make it closer to 1:1
+    n_train_matches = (y_train == 1).sum()
+    n_train_non_matches = (y_train == 0).sum()
+
+    # If imbalanced, upsample matches to create better balance
+    if n_train_matches < n_train_non_matches * 0.4:
+        # Upsample matches by randomly repeating them
+        match_indices = (y_train == 1).nonzero()[0]
+        non_match_indices = (y_train == 0).nonzero()[0]
+        
+        # Sample non-matches to match the count of matches (1:1 ratio)
+        target_non_match_count = int(n_train_matches * 1.5)  # 1:1.5 ratio
+        if target_non_match_count < len(non_match_indices):
+            sampled_non_match_indices = cupy.random.choice(
+                non_match_indices, 
+                size=target_non_match_count, 
+                replace=False
+            )
+        else:
+            sampled_non_match_indices = non_match_indices
+        
+        balanced_indices = cupy.concatenate([match_indices, sampled_non_match_indices])
+        X_train = X_train.take(balanced_indices)
+        y_train = y_train.take(balanced_indices)
+
     # Initialize and train the classifier
     clf = RandomForestClassifier(
         n_estimators=n_estimators, 
         random_state=42,
-        class_weight='balanced',  # Automatically adjust weights inversely proportional to class frequencies
         max_depth=15,              # Limit depth to reduce overfitting
         min_samples_split=20,      # Require more samples to split (reduces noise)
         min_samples_leaf=10        # Require more samples in leaf nodes
