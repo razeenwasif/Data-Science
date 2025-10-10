@@ -26,49 +26,25 @@ def gpu_levenshtein(s1, s2, out):
     """Numba CUDA kernel to compute Levenshtein similarity for two series of strings."""
 
 
-def get_char_vocab_gpu(s1, s2):
-    """Create a character vocabulary (char-to-int mapping) from two series of strings on GPU.
-       Codes start from 1, 0 is reserved for padding."""
-    s = cudf.concat([s1, s2])
-    # Drop nulls which can result from empty strings
-    unique_chars = s.str.character_tokenize().dropna().unique()
-    # Start codes from 1
-    char_to_int_df = cudf.DataFrame({
-        'char': unique_chars,
-        'code': cupy.arange(1, len(unique_chars) + 1, dtype=cupy.int32)
-    })
-    return char_to_int_df.set_index('char')['code'] # Return a Series to use as a map
+def get_char_vocab(s1, s2):
+    """Create a character vocabulary (char-to-int mapping) from two series of strings."""
+    chars = set()
+    for s in s1.to_pandas():
+        chars.update(s)
+    for s in s2.to_pandas():
+        chars.update(s)
+    char_to_int = {char: i for i, char in enumerate(chars)}
+    return char_to_int
 
-def strings_to_char_arrays_gpu(s, char_to_int_map, max_len=256):
-    """Convert a series of strings to a 2D CuPy array of character indices, fully on GPU."""
+def strings_to_char_arrays(s, char_to_int):
+    """Convert a series of strings to a 2D NumPy array of character indices."""
     num_strings = len(s)
-    
-    # Tokenize to get a series with original record index and character value
-    token_series = s.str.character_tokenize()
-    tokens = token_series.reset_index()
-    tokens.columns = ['rec_index', 'char']
-
-    # Generate the character position within each record
-    tokens['char_pos'] = tokens.groupby('rec_index').cumcount()
-    
-    tokens = tokens[tokens.char_pos < max_len]
-    
-    # Map characters to integers
-    tokens = tokens.merge(char_to_int_map.rename('code'), left_on='char', right_index=True, how='left')
-    
-    # Pivot to create the dense array
-    pivoted = tokens.pivot(index='rec_index', columns='char_pos', values='code')
-    
-    # Reindex to ensure all original strings are present and columns are ordered
-    all_rec_indices = cudf.Index(cupy.arange(num_strings, dtype=cupy.int32))
-    all_char_positions = cudf.Index(cupy.arange(max_len, dtype=cupy.int32))
-    
-    pivoted = pivoted.reindex(index=all_rec_indices, columns=all_char_positions)
-    
-    # Fill padding and convert to cupy array
-    padded_arr = pivoted.fillna(0).to_cupy(dtype=cupy.int32)
-    
-    return padded_arr
+    char_arrays = np.zeros((num_strings, MAX_STRING_LEN), dtype=np.int32)
+    for i, string in enumerate(s.to_pandas()):
+        for j, char in enumerate(string):
+            if j < MAX_STRING_LEN:
+                char_arrays[i, j] = char_to_int[char]
+    return char_arrays
 
 @cuda.jit(device=True)
 def jaro_winkler_similarity_kernel(s1, s2):
@@ -601,10 +577,12 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
             sim_col = (2 * sim_df['intersection_size'] / sum_len).fillna(0)
 
         elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
-            # GPU-native character array conversion
-            char_to_int_map = get_char_vocab_gpu(col_A, col_B)
-            d_s1 = strings_to_char_arrays_gpu(col_A, char_to_int_map, max_len=MAX_STRING_LEN)
-            d_s2 = strings_to_char_arrays_gpu(col_B, char_to_int_map, max_len=MAX_STRING_LEN)
+            # ... (GPU Jaro/Levenshtein logic remains the same)
+            char_to_int = get_char_vocab(col_A, col_B)
+            s1_arr = strings_to_char_arrays(col_A, char_to_int)
+            s2_arr = strings_to_char_arrays(col_B, char_to_int)
+            d_s1 = cuda.to_device(s1_arr)
+            d_s2 = cuda.to_device(s2_arr)
             d_out = cuda.device_array(len(col_A), dtype=np.float32)
             threadsperblock = 256
             blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
