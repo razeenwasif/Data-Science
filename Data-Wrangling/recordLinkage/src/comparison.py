@@ -516,11 +516,19 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
 
     pairs_gdf = cudf.DataFrame(pairs_chunk, columns=['rec_id_A', 'rec_id_B'])
 
-    # 2. Join with attribute data
-    merged_gdf = pairs_gdf.merge(recA_gdf_renamed, left_on='rec_id_A', right_index=True, how='left')
-    merged_gdf = merged_gdf.merge(recB_gdf_renamed, left_on='rec_id_B', right_index=True, how='left')
+    # 1. Get unique record IDs from the current chunk
+    unique_ids_A = pairs_gdf['rec_id_A'].unique()
+    unique_ids_B = pairs_gdf['rec_id_B'].unique()
 
-    # 3. Apply comparisons
+    # 2. Select ONLY the necessary records from the main DataFrames
+    chunk_recA_gdf = recA_gdf_renamed.loc[unique_ids_A]
+    chunk_recB_gdf = recB_gdf_renamed.loc[unique_ids_B]
+
+    # 3. Now, merge with these much smaller, filtered DataFrames
+    merged_gdf = pairs_gdf.merge(chunk_recA_gdf, left_on='rec_id_A', right_index=True, how='left')
+    merged_gdf = merged_gdf.merge(chunk_recB_gdf, left_on='rec_id_B', right_index=True, how='left')
+
+    # 4. Apply comparisons
     print(f'  Comparing attribute values for candidate pairs chunk {chunk_num} (using native cudf and custom kernels where possible)...')
     sys.stdout.flush()
     
@@ -617,7 +625,7 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     sys.stdout.flush()
 
     all_sim_vectors_gdf = []
-    chunk_size = 1000000  # Process 1 million pairs at a time to manage memory
+    chunk_size = 100000  # Process 100,000 pairs at a time to manage memory
     pair_buffer = []
     chunk_num = 1
 
@@ -651,6 +659,11 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     print(f'  Compared {len(final_sim_vectors_gdf)} record pairs')
     print('')
     sys.stdout.flush()
+
+    # Clean up the list of chunked dataframes
+    del all_sim_vectors_gdf
+    import gc
+    gc.collect()
 
     return final_sim_vectors_gdf
 # -----------------------------------------------------------------------------
