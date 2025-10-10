@@ -317,8 +317,17 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     print('')
     sys.stdout.flush()
 
-    # Classify all record pairs
-    predictions = clf.predict(X)
+    # Classify all record pairs in batches to avoid OOM on predict
+    chunk_size = 5_000_000  # Tunable parameter
+    predictions_list = []
+    print(f'  Predicting on {len(X)} pairs in {((len(X)-1)//chunk_size)+1} chunks of size {chunk_size}...')
+    sys.stdout.flush()
+    for i in range(0, len(X), chunk_size):
+        chunk = X.iloc[i:i + chunk_size]
+        chunk_predictions = clf.predict(chunk)
+        predictions_list.append(chunk_predictions)
+    
+    predictions = cupy.concatenate(predictions_list)
     
     # Vectorized result collection
     #
