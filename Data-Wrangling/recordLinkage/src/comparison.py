@@ -92,8 +92,13 @@ def strings_to_char_arrays_gpu(s, ascii_to_code_map, max_len=256):
     output_array = cupy.zeros((num_strings, max_len), dtype=cupy.int32)
 
     # Get the underlying character and offset arrays from the string column
-    # Note: This relies on the internal structure of cudf.StringColumn
     str_col = s._column
+
+    # Handle edge case where a chunk contains only empty strings for an attribute
+    if len(str_col.children) < 2:
+        # This means there are no characters to process, so return the zero-filled array
+        return output_array
+
     strings_chars = str_col.children[1].values
     strings_offsets = str_col.children[0].values
 
