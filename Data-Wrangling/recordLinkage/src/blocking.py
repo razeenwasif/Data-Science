@@ -546,13 +546,15 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     # Convert the numpy array of indices to a cupy array before passing to take()
     pairs_B_indices_gpu = cupy.asarray(pairs_B_indices)
 
-    # Get the raw values of the columns, which discards the problematic index
-    col_A_vals = rec_ids_A_series.take(cupy.ascontiguousarray(pairs_A)).values
-    col_B_vals = rec_ids_B_series.take(pairs_B_indices_gpu).values
+    # Create the two columns for the new DataFrame
+    col_A = rec_ids_A_series.take(cupy.ascontiguousarray(pairs_A))
+    col_B = rec_ids_B_series.take(pairs_B_indices_gpu)
 
+    # Create the DataFrame, resetting the indices of the source columns to
+    # avoid the "Cannot align indices with non-unique values" error.
     candidate_pairs_gdf = cudf.DataFrame({
-        'rec_id_A': col_A_vals,
-        'rec_id_B': col_B_vals
+        'rec_id_A': col_A.reset_index(drop=True),
+        'rec_id_B': col_B.reset_index(drop=True)
     })
     
     print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
