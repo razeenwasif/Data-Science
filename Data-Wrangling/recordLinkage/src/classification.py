@@ -264,25 +264,14 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     sys.stdout.flush()
 
     if n_non_match_sample > 0:
-        # To avoid materializing all non-match indices, we sample from the whole dataset's
-        # indices and then filter for non-matches. We oversample to ensure we get enough.
-        oversampling_factor = 1.2  # Should be > (n_total / n_non_matches)
-        num_to_sample = int(min(n_non_match_sample * oversampling_factor, n_total))
+        # Efficiently sample non-matches directly on the GPU
+        # 1. Get the original indices of all non-matches
+        non_match_indices_gpu = y[y == 0].index.to_series()
+        
+        # 2. Use cuDF's native sampling to select non-matches
+        sampled_non_match_indices = non_match_indices_gpu.sample(n=n_non_match_sample, replace=False)
 
-        # Generate random indices on CPU and move to GPU
-        random_indices_cpu = np.random.choice(n_total, size=num_to_sample, replace=False)
-        random_indices_gpu = cudf.Series(random_indices_cpu)
-
-        # Get the labels for these random indices
-        y_sample = y.take(random_indices_gpu)
-
-        # Filter for indices that correspond to non-matches
-        sampled_non_match_indices = random_indices_gpu[y_sample == 0]
-
-        # Truncate to the desired sample size
-        if len(sampled_non_match_indices) > n_non_match_sample:
-            sampled_non_match_indices = sampled_non_match_indices.iloc[:n_non_match_sample]
-
+        # 3. Gather the sampled data
         X_non_match_sample = X.take(sampled_non_match_indices)
         y_non_match_sample = y.take(sampled_non_match_indices)
 

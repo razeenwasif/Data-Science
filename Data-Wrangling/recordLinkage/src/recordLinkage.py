@@ -81,12 +81,12 @@ def main():
     state_blocks_A = blocking.simpleBlocking(recA_gdf, partition_attr)
     state_blocks_B = blocking.simpleBlocking(recB_gdf, partition_attr)
 
-    final_blocks_A = {}
-    final_blocks_B = {}
+    all_candidate_pairs_list = []
 
-    # --- Canopy Clustering within each partition ---
-    logging.info('Running canopy clustering within each state partition...')
-    canopy_attrs = ['first_name', 'last_name', 'suburb']
+    # --- ANN Candidate Generation within each partition ---
+    logging.info('Running ANN candidate generation within each state partition...')
+    ann_attrs = ['first_name', 'last_name', 'suburb']
+    K_NEIGHBORS = 25
 
     # Get a set of common state keys to iterate over
     common_states = set(state_blocks_A.keys()) & set(state_blocks_B.keys())
@@ -101,29 +101,26 @@ def main():
         temp_gdf_A = recA_gdf.loc[rec_ids_A]
         temp_gdf_B = recB_gdf.loc[rec_ids_B]
 
-        # Run canopy clustering on the smaller, state-specific dataframes
-        canopy_blocks_A = blocking.canopy_clustering(temp_gdf_A, canopy_attrs, T1=0.8, T2=0.6)
-        canopy_blocks_B = blocking.canopy_clustering(temp_gdf_B, canopy_attrs, T1=0.8, T2=0.6)
+        # Generate candidate pairs for the partition using ANN search
+        partition_pairs_gdf = blocking.ann_candidate_generation(temp_gdf_A, temp_gdf_B, k=K_NEIGHBORS, blk_attr_list=ann_attrs)
+        all_candidate_pairs_list.append(partition_pairs_gdf)
 
-        # Merge the results from this partition into the final block dictionaries
-        final_blocks_A = blocking.merge_block_dicts(final_blocks_A, canopy_blocks_A)
-        final_blocks_B = blocking.merge_block_dicts(final_blocks_B, canopy_blocks_B)
-
-    # Use the final merged blocks for the rest of the process
-    blockA_dict = final_blocks_A
-    blockB_dict = final_blocks_B
+    # Combine candidate pairs from all partitions
+    candidate_pairs_gdf = cudf.concat(all_candidate_pairs_list, ignore_index=True)
+    candidate_pairs_gdf = candidate_pairs_gdf.drop_duplicates()
+    
+    logging.info(f"Total candidate pairs generated from ANN blocking: {len(candidate_pairs_gdf)}")
 
     blocking_time = time.time() - start_time
     logging.info(f"Data blocking took {blocking_time:.3f} seconds.")
-    blocking.printBlockStatistics(blockA_dict, blockB_dict)
+    # Note: printBlockStatistics is not applicable to the new pair-based approach
 
     # -----------------------------------------------------------------------------
     # Step 3: Compare the candidate pairs
     start_time = time.time()
 
-    sim_vectors_gdf = comparison.compareBlocks(blockA_dict, blockB_dict, \
-                                            recA_gdf, recB_gdf, \
-                                            approx_comp_funct_list)
+    sim_vectors_gdf = comparison.compare_pairs(candidate_pairs_gdf, recA_gdf, recB_gdf, \
+                                               approx_comp_funct_list)
 
     comparison_time = time.time() - start_time
     logging.info(f"Data comparison took {comparison_time:.3f} seconds.")

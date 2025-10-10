@@ -52,8 +52,6 @@ def load_data_set(file_name, rec_id_col_name, use_attr_list):
     print(f'  Loaded {len(gdf)} records.')
     print('')
 
-    rec_dict = gdf.to_pandas().to_dict('index')
-
     return gdf
 
 def load_truth_data(file_name):

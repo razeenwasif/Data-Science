@@ -459,7 +459,84 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
     sys.stdout.flush()
 
     return block_dict
+
+def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold=0.5):
+    """
+    Generates candidate pairs using Approximate Nearest Neighbor (ANN) search with Faiss.
+
+    This approach vectorizes records from two dataframes, indexes one, and searches
+    it for the k-nearest neighbors of each record from the other dataframe.
+
+    Parameters:
+        recA_gdf (cudf.DataFrame): The first dataframe of records.
+        recB_gdf (cudf.DataFrame): The second dataframe of records.
+        k (int): The number of nearest neighbors to find for each record in recA_gdf.
+        blk_attr_list (list): List of attribute names to use for vectorization.
+        sim_threshold (float): Cosine similarity threshold to filter candidate pairs.
+
+    Returns:
+        cudf.DataFrame: A DataFrame of candidate pairs ('rec_id_A', 'rec_id_B').
+    """
+    print(f"Running ANN candidate generation for {len(recA_gdf)} x {len(recB_gdf)} records...")
+    sys.stdout.flush()
+
+    if recA_gdf.empty or recB_gdf.empty:
+        return cudf.DataFrame({'rec_id_A': [], 'rec_id_B': []})
+
+    # Step 1: Vectorize both datasets
+    vectors_A = _vectorize_for_faiss_tfidf(recA_gdf.copy(), blk_attr_list)
+    vectors_B = _vectorize_for_faiss_tfidf(recB_gdf.copy(), blk_attr_list)
+    dim = vectors_A.shape[1]
+
+    vectors_A_np = vectors_A.to_cupy().get() # to NumPy for Faiss
+    vectors_B_np = vectors_B.to_cupy().get()
+
+    # Step 2: Build and train Faiss index for dataset B
+    nlist = int(np.sqrt(len(recB_gdf)))
+    quantizer = faiss.IndexFlatL2(dim)
+    index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+    
+    res = faiss.StandardGpuResources()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+    gpu_index.train(vectors_B_np)
+    gpu_index.add(vectors_B_np)
+    gpu_index.nprobe = 10
+
+    # Step 3: Search for k-nearest neighbors
+    # Squared L2 distance threshold: L2_dist^2 = 2 - 2 * cos_sim
+    l2_dist_sq_threshold = 2 - (2 * sim_threshold)
+    
+    distances, indices = gpu_index.search(vectors_A_np, k)
+
+    # Step 4: Process results to create candidate pairs
+    rec_ids_A = recA_gdf.index.to_cupy()
+    rec_ids_B = recB_gdf.index.to_cupy()
+
+    pairs_A = cupy.repeat(cupy.arange(len(recA_gdf)), k)
+    pairs_B_indices = indices.flatten()
+    
+    # Filter out invalid indices (-1) from Faiss search
+    valid_mask = pairs_B_indices != -1
+    pairs_A = pairs_A[valid_mask]
+    pairs_B_indices = pairs_B_indices[valid_mask]
+    
+    # Filter by distance threshold
+    dist_mask = distances.flatten()[valid_mask] <= l2_dist_sq_threshold
+    pairs_A = pairs_A[dist_mask]
+    pairs_B_indices = pairs_B_indices[dist_mask]
+
+    candidate_pairs_gdf = cudf.DataFrame({
+        'rec_id_A': rec_ids_A[pairs_A],
+        'rec_id_B': rec_ids_B[pairs_B_indices]
+    })
+    
+    print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
+    sys.stdout.flush()
+    
+    return candidate_pairs_gdf
+
 # -----------------------------------------------------------------------------
+
 
 
 def merge_block_dicts(dict1, dict2):
