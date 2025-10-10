@@ -565,7 +565,7 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     del quantizer, index, gpu_index, res
     del distances, indices
     del pairs_A, pairs_B_indices, pairs_B_indices_gpu
-    del col_A_vals, col_B_vals
+    del col_A, col_B
     import gc
     gc.collect()
     
