@@ -208,7 +208,7 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
+def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, threshold=0.4):
     """A classifier method based on a supervised machine learning technique
      (random forest) which learns from the given similarity vectors and the
      true match status set provided.
@@ -225,6 +225,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
                          vectors.
        true_match_set : Set of true matches (record identifier pairs)
        n_estimators   : The number of trees in the forest.
+       threshold      : The probability threshold to classify a pair as a match.
   """
 
     class_match_set =    set()
@@ -309,28 +310,17 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     # Classify all record pairs in batches to avoid OOM on predict
     chunk_size = 1_000_000  # Tunable parameter
     predictions_list = []
-    max_match_proba = 0.0 # DEBUG: Track max match probability
     print(f'  Predicting on {len(X)} pairs in {((len(X)-1)//chunk_size)+1} chunks of size {chunk_size}...')
     sys.stdout.flush()
     for i in range(0, len(X), chunk_size):
         chunk = X.iloc[i:i + chunk_size]
-        # Get probabilities, not just hard predictions
         chunk_probas = clf.predict_proba(chunk)
-        
-        # Keep track of the highest match probability found
-        if len(chunk_probas) > 0:
-            # chunk_probas is a DataFrame, so we access the column for class '1'
-            max_match_proba = max(max_match_proba, chunk_probas[1].max())
 
-        # Get hard predictions based on 0.5 threshold for downstream logic
-        chunk_predictions = (chunk_probas[1] >= 0.5).astype('int32')
+        # Get hard predictions based on the provided threshold
+        chunk_predictions = (chunk_probas[1] >= threshold).astype('int32')
         predictions_list.append(chunk_predictions)
-    
-    predictions = cupy.concatenate(predictions_list)
 
-    # --- DEBUG: Print the max probability ---
-    print(f'  DEBUG: Maximum match probability found across all pairs: {max_match_proba:.4f}')
-    sys.stdout.flush()
+    predictions = cupy.concatenate(predictions_list)
 
     # --- Memory Cleanup ---
     # Explicitly delete large objects that are no longer needed to free up GPU memory.
