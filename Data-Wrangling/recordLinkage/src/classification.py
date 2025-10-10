@@ -247,41 +247,55 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     y = labeled_pairs['label'].fillna(0).astype('int32')
 
     # --- Create a smaller, balanced sample for training to avoid memory issues ---
-    
+
     # Get all true matches (these are few, so this is fine)
     match_mask = (y == 1)
     X_matches = X[match_mask]
     y_matches = y[match_mask]
-    
-    import numpy as np
-
-    # Get the indices of non-matches without creating a large intermediate dataframe
-    non_match_indices = y.index[y == 0]
-    n_non_matches = len(non_match_indices)
-
-    # We will use all true matches for training, and sample the non-matches
     n_matches = len(X_matches)
-    # Create a larger sample of non-matches to help the classifier learn
+
+    # Efficiently sample non-matches to avoid out-of-memory errors
+    n_total = len(y)
+    n_non_matches = n_total - n_matches
     n_non_match_sample = min(n_non_matches, n_matches * 5)
 
     print(f'  Creating a training sample with all {n_matches} matches and' + \
-          f' {n_non_match_sample} non-matches.')
+          f' up to {n_non_match_sample} non-matches.')
     sys.stdout.flush()
 
-    # Use numpy on CPU to generate random indices to avoid large GPU allocations
-    cpu_random_indices = np.random.choice(n_non_matches, size=n_non_match_sample, replace=False)
-    gpu_random_indices = cudf.Series(cpu_random_indices)
+    if n_non_match_sample > 0:
+        # To avoid materializing all non-match indices, we sample from the whole dataset's
+        # indices and then filter for non-matches. We oversample to ensure we get enough.
+        oversampling_factor = 1.2  # Should be > (n_total / n_non_matches)
+        num_to_sample = int(min(n_non_match_sample * oversampling_factor, n_total))
 
-    # Use .take() to gather the sample using the generated indices
-    sampled_non_match_indices = non_match_indices.take(gpu_random_indices)
+        # Generate random indices on CPU and move to GPU
+        random_indices_cpu = np.random.choice(n_total, size=num_to_sample, replace=False)
+        random_indices_gpu = cudf.Series(random_indices_cpu)
 
-    # Use the sampled indices to gather the non-match sample
-    X_non_match_sample = X.loc[sampled_non_match_indices]
-    y_non_match_sample = y.loc[sampled_non_match_indices]
+        # Get the labels for these random indices
+        y_sample = y.take(random_indices_gpu)
 
-    # Combine to form the final sampled dataset for training/testing
-    X_sampled = cudf.concat([X_matches, X_non_match_sample])
-    y_sampled = cudf.concat([y_matches, y_non_match_sample])
+        # Filter for indices that correspond to non-matches
+        sampled_non_match_indices = random_indices_gpu[y_sample == 0]
+
+        # Truncate to the desired sample size
+        if len(sampled_non_match_indices) > n_non_match_sample:
+            sampled_non_match_indices = sampled_non_match_indices.iloc[:n_non_match_sample]
+
+        X_non_match_sample = X.loc[sampled_non_match_indices]
+        y_non_match_sample = y.loc[sampled_non_match_indices]
+
+        print(f'  Actually using {len(X_non_match_sample)} non-matches for training.')
+        sys.stdout.flush()
+
+        # Combine to form the final sampled dataset for training/testing
+        X_sampled = cudf.concat([X_matches, X_non_match_sample])
+        y_sampled = cudf.concat([y_matches, y_non_match_sample])
+    else:
+        # Handle case with no non-matches to sample
+        X_sampled = X_matches
+        y_sampled = y_matches
 
     # Split the SMALLER, SAMPLED dataset into training and testing sets
     X_train, X_test, y_train, y_test = train_test_split(X_sampled, y_sampled, \
