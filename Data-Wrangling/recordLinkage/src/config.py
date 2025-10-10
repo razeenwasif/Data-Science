@@ -11,3 +11,6 @@ ML_N_ESTIMATORS = 10
 # Logging configuration
 LOG_LEVEL = 'INFO' # Can be 'DEBUG', 'INFO', 'WARNING', etc.
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+
+# Flag to enable or disable GPU comparison
+USE_GPU_COMPARISON = True

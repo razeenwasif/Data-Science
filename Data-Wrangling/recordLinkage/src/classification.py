@@ -343,12 +343,14 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
     else:  # Most scores are high, use provided threshold or be very conservative
         dynamic_threshold = max(threshold, 0.5)
     
-    print(f'  Using dynamic threshold: {dynamic_threshold:.3f} (provided threshold was {threshold:.3f})')
+    print(f'  Using dynamic threshold: {0.5:.3f} (provided threshold was {threshold:.3f})')
     print('')
     sys.stdout.flush()
+
+    fixed_threshold = 0.5
     
     # Second pass: apply threshold to get predictions
-    predictions = (probas_all >= dynamic_threshold).astype('int32')
+    predictions = (probas_all >= fixed_threshold).astype('int32')
 
     # --- Memory Cleanup ---
     print('  Cleaning up memory before final result collection...')

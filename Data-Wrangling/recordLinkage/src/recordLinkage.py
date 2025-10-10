@@ -51,10 +51,10 @@ def main():
 
     # The list of tuples (comparison function, attribute name in record A,
     # attribute name in record B)
-    approx_comp_funct_list = [(comparison.jaccard_comp, 'first_name', 'first_name'),
-                              (comparison.dice_comp, 'middle_name', 'middle_name'),
-                              (comparison.jaro_winkler_comp, 'last_name', 'last_name'),
-                              (comparison.edit_dist_sim_comp, 'suburb', 'suburb'),
+    approx_comp_funct_list = [(comparison.jaccard_comp_gpu, 'first_name', 'first_name'),
+                              (comparison.dice_comp_gpu, 'middle_name', 'middle_name'),
+                              (comparison.jaro_winkler_comp_gpu, 'last_name', 'last_name'),
+                              (comparison.levenshtein_comp_gpu, 'suburb', 'suburb'),
                               (comparison.exact_comp, 'state', 'state'),
                              ]
 
