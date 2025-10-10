@@ -329,16 +329,29 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
     
     predictions = cupy.concatenate(predictions_list)
     
-    # Vectorized result collection
+    # Vectorized result collection in chunks to avoid OOM
     #
     predictions_series = cudf.Series(predictions)
-    match_mask = predictions_series == 1
+    match_mask = (predictions_series == 1)
 
-    match_pairs = rec_pairs[match_mask]
-    non_match_pairs = rec_pairs[~match_mask]
+    chunk_size = 5_000_000
+    class_match_set = set()
+    class_nonmatch_set = set()
 
-    class_match_set = set(map(tuple, match_pairs.to_pandas().to_records(index=False)))
-    class_nonmatch_set = set(map(tuple, non_match_pairs.to_pandas().to_records(index=False)))
+    print(f'  Collecting results in {((len(rec_pairs)-1)//chunk_size)+1} chunks of size {chunk_size}...')
+    sys.stdout.flush()
+
+    for i in range(0, len(rec_pairs), chunk_size):
+        rec_pairs_chunk = rec_pairs.iloc[i:i + chunk_size]
+        mask_chunk = match_mask.iloc[i:i + chunk_size]
+
+        match_pairs_chunk = rec_pairs_chunk[mask_chunk]
+        if not match_pairs_chunk.empty:
+            class_match_set.update(map(tuple, match_pairs_chunk.to_pandas().to_records(index=False)))
+
+        non_match_pairs_chunk = rec_pairs_chunk[~mask_chunk]
+        if not non_match_pairs_chunk.empty:
+            class_nonmatch_set.update(map(tuple, non_match_pairs_chunk.to_pandas().to_records(index=False)))
 
     print('  Classified %d record pairs as matches and %d as non-matches' % \
         (len(class_match_set), len(class_nonmatch_set)))
