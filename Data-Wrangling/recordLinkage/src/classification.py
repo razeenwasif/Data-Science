@@ -208,7 +208,7 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, threshold=0.4):
+def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, threshold=0.1):
     """A classifier method based on a supervised machine learning technique
      (random forest) which learns from the given similarity vectors and the
      true match status set provided.
@@ -255,13 +255,16 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     y_matches = y[match_mask]
     n_matches = len(X_matches)
 
+    print(f'  Total true matches in dataset: {n_matches}')
+    print(f'  Total non-matches in dataset: {len(y) - n_matches}')
+
     # Efficiently sample non-matches to avoid out-of-memory errors
     n_total = len(y)
     n_non_matches = n_total - n_matches
-    n_non_match_sample = min(n_non_matches, n_matches * 5)
+    n_non_match_sample = min(n_non_matches, n_matches * 2)
 
     print(f'  Creating a training sample with all {n_matches} matches and' + \
-          f' up to {n_non_match_sample} non-matches.')
+          f' {n_non_match_sample} non-matches (1:{n_non_match_sample//n_matches if n_matches > 0 else 0} ratio).')
     sys.stdout.flush()
 
     if n_non_match_sample > 0:
@@ -296,9 +299,18 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5, thresh
     print('  Number of testing records: %d' % len(X_test))
     print('')
     sys.stdout.flush()
-
+    
+    # Strategy 2: Use class_weight to penalize misclassification of matches
+    # This makes the classifier more sensitive to minority class (matches)
     # Initialize and train the classifier
-    clf = RandomForestClassifier(n_estimators=n_estimators, random_state=42)
+    clf = RandomForestClassifier(
+        n_estimators=n_estimators, 
+        random_state=42,
+        class_weight='balanced',  # Automatically adjust weights inversely proportional to class frequencies
+        max_depth=15,              # Limit depth to reduce overfitting
+        min_samples_split=20,      # Require more samples to split (reduces noise)
+        min_samples_leaf=10        # Require more samples in leaf nodes
+    )
     clf.fit(X_train, y_train)
 
     # Evaluate the classifier on the sampled test set
