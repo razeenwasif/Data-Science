@@ -488,8 +488,8 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     vectors_B = _vectorize_for_faiss_tfidf(recB_gdf.copy(), blk_attr_list)
     dim = vectors_A.shape[1]
 
-    vectors_A_np = vectors_A.to_cupy().get() # to NumPy for Faiss
-    vectors_B_np = vectors_B.to_cupy().get()
+    vectors_A_np = vectors_A.toarray().get() # to NumPy for Faiss
+    vectors_B_np = vectors_B.toarray().get()
 
     # Step 2: Build and train Faiss index for dataset B
     nlist = int(np.sqrt(len(recB_gdf)))
