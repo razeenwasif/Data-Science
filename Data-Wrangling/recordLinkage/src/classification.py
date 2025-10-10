@@ -283,8 +283,8 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
         if len(sampled_non_match_indices) > n_non_match_sample:
             sampled_non_match_indices = sampled_non_match_indices.iloc[:n_non_match_sample]
 
-        X_non_match_sample = X.loc[sampled_non_match_indices]
-        y_non_match_sample = y.loc[sampled_non_match_indices]
+        X_non_match_sample = X.take(sampled_non_match_indices)
+        y_non_match_sample = y.take(sampled_non_match_indices)
 
         print(f'  Actually using {len(X_non_match_sample)} non-matches for training.')
         sys.stdout.flush()
