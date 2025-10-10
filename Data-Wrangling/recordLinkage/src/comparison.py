@@ -26,25 +26,90 @@ def gpu_levenshtein(s1, s2, out):
     """Numba CUDA kernel to compute Levenshtein similarity for two series of strings."""
 
 
-def get_char_vocab(s1, s2):
-    """Create a character vocabulary (char-to-int mapping) from two series of strings."""
-    chars = set()
-    for s in s1.to_pandas():
-        chars.update(s)
-    for s in s2.to_pandas():
-        chars.update(s)
-    char_to_int = {char: i for i, char in enumerate(chars)}
-    return char_to_int
+def get_char_vocab_ascii_map(s1, s2):
+    """
+    Creates a mapping from ASCII value to an integer code for use in a Numba kernel.
+    Returns a CuPy array where index=ASCII_code and value=integer_code.
+    """
+    # Combine series and get unique characters on GPU
+    s = cudf.concat([s1, s2])
+    unique_chars_series = s.str.character_tokenize().dropna().unique()
+    
+    # Pull unique characters to CPU to build map (small, one-time cost)
+    unique_chars_cpu = unique_chars_series.to_pandas()
+    
+    # Create a map from ascii code -> integer code.
+    # Using 256 to cover the extended ASCII range.
+    # 0 is reserved for padding. Codes start from 1.
+    ascii_map = np.zeros(256, dtype=np.int32)
+    for i, char in enumerate(unique_chars_cpu):
+        if len(char) == 1:
+            ascii_val = ord(char)
+            if ascii_val < 256:
+                ascii_map[ascii_val] = i + 1
+                
+    return cupy.asarray(ascii_map)
 
-def strings_to_char_arrays(s, char_to_int):
-    """Convert a series of strings to a 2D NumPy array of character indices."""
+@cuda.jit
+def _fill_char_arrays_kernel(strings_chars, strings_offsets, ascii_to_code_map, output_array, max_len):
+    """
+    Numba kernel to convert a cuDF string column into a dense 2D array of integer codes.
+    """
+    i = cuda.grid(1)
+    if i >= len(strings_offsets) - 1:
+        return
+
+    # Get start and end position of the string in the character buffer
+    start = strings_offsets[i]
+    end = strings_offsets[i+1]
+    length = end - start
+
+    # Loop through characters of the string
+    for j in range(length):
+        if j >= max_len:
+            break
+        
+        # Get the byte value of the character
+        char_byte = strings_chars[start + j]
+        
+        # Look up the integer code from the ASCII map
+        # Note: Assumes character bytes are < 256
+        if char_byte < 256:
+            code = ascii_to_code_map[char_byte]
+            output_array[i, j] = code
+        # Characters outside the map will remain 0 (padding value)
+
+def strings_to_char_arrays_gpu(s, ascii_to_code_map, max_len=256):
+    """
+    Wrapper function to convert a cuDF string Series to a 2D CuPy array
+    of character codes using a Numba kernel.
+    """
     num_strings = len(s)
-    char_arrays = np.zeros((num_strings, MAX_STRING_LEN), dtype=np.int32)
-    for i, string in enumerate(s.to_pandas()):
-        for j, char in enumerate(string):
-            if j < MAX_STRING_LEN:
-                char_arrays[i, j] = char_to_int[char]
-    return char_arrays
+    if num_strings == 0:
+        return cupy.empty((0, max_len), dtype=cupy.int32)
+
+    # Allocate output array on GPU, initialized to 0 (padding value)
+    output_array = cupy.zeros((num_strings, max_len), dtype=cupy.int32)
+
+    # Get the underlying character and offset arrays from the string column
+    # Note: This relies on the internal structure of cudf.StringColumn
+    str_col = s._column
+    strings_chars = str_col.children[1].values
+    strings_offsets = str_col.children[0].values
+
+    # Configure and launch the kernel
+    threads_per_block = 256
+    blocks_per_grid = (num_strings + threads_per_block - 1) // threads_per_block
+    
+    _fill_char_arrays_kernel[blocks_per_grid, threads_per_block](
+        strings_chars,
+        strings_offsets,
+        ascii_to_code_map,
+        output_array,
+        max_len
+    )
+    
+    return output_array
 
 @cuda.jit(device=True)
 def jaro_winkler_similarity_kernel(s1, s2):
@@ -577,12 +642,13 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
             sim_col = (2 * sim_df['intersection_size'] / sum_len).fillna(0)
 
         elif comp_funct in [jaro_winkler_comp, edit_dist_sim_comp]:
-            # ... (GPU Jaro/Levenshtein logic remains the same)
-            char_to_int = get_char_vocab(col_A, col_B)
-            s1_arr = strings_to_char_arrays(col_A, char_to_int)
-            s2_arr = strings_to_char_arrays(col_B, char_to_int)
-            d_s1 = cuda.to_device(s1_arr)
-            d_s2 = cuda.to_device(s2_arr)
+            # Create the ASCII-to-code map from both columns
+            ascii_map = get_char_vocab_ascii_map(col_A, col_B)
+            
+            # Convert string columns to 2D integer arrays on the GPU
+            d_s1 = strings_to_char_arrays_gpu(col_A, ascii_map, max_len=MAX_STRING_LEN)
+            d_s2 = strings_to_char_arrays_gpu(col_B, ascii_map, max_len=MAX_STRING_LEN)
+            
             d_out = cuda.device_array(len(col_A), dtype=np.float32)
             threadsperblock = 256
             blockspergrid = (len(col_A) + (threadsperblock - 1)) // threadsperblock
