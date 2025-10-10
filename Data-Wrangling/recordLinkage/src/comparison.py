@@ -647,7 +647,7 @@ def compareBlocks(blockA_dict, blockB_dict, recA_gdf, recB_gdf, attr_comp_list):
     sys.stdout.flush()
 
     all_sim_vectors_gdf = []
-    chunk_size = 1_000_000  # Process 100,000 pairs at a time to manage memory
+    chunk_size = 5_000_000  # Process 100,000 pairs at a time to manage memory
     pair_buffer = []
     chunk_num = 1
 

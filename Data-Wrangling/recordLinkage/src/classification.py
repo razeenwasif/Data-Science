@@ -319,10 +319,11 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=5):
         
         # Keep track of the highest match probability found
         if len(chunk_probas) > 0:
-            max_match_proba = max(max_match_proba, chunk_probas[:, 1].max())
+            # chunk_probas is a DataFrame, so we access the column for class '1'
+            max_match_proba = max(max_match_proba, chunk_probas[1].max())
 
         # Get hard predictions based on 0.5 threshold for downstream logic
-        chunk_predictions = (chunk_probas[:, 1] >= 0.5).astype('int32')
+        chunk_predictions = (chunk_probas[1] >= 0.5).astype('int32')
         predictions_list.append(chunk_predictions)
     
     predictions = cupy.concatenate(predictions_list)
