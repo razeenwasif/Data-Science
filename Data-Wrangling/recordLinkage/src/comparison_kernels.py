@@ -11,7 +11,6 @@ from numba_kernels import (
     calculate_dice_similarity_gpu_pairwise,
     calculate_jaro_winkler_pairwise_gpu,
     calculate_levenshtein_pairwise_gpu,
-    get_q_grams_set,
 )
 
 MAX_STRING_LEN = 128

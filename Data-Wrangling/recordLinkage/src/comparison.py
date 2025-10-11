@@ -1,7 +1,9 @@
+"""GPU-accelerated comparison utilities used throughout the linkage pipeline."""
+
 import code
-import os 
+import os
 import numpy as np
-import sys 
+import sys
 from collections import Counter
 import cudf
 import cugraph
@@ -11,7 +13,6 @@ from numba_kernels import (
     calculate_dice_similarity_gpu_pairwise,
     calculate_jaro_winkler_pairwise_gpu,
     calculate_levenshtein_pairwise_gpu,
-    get_q_grams_set,
 )
 
 from config import USE_GPU_COMPARISON
@@ -20,6 +21,30 @@ from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
 MAX_STRING_LEN = 256
+
+def _series_to_padded_uint8(series, max_len=MAX_STRING_LEN):
+    """Convert cuDF string Series to numpy uint8 padded array and lengths.
+    Returns (arr, lengths) where arr.shape = (n, max_len), dtype=uint8 and
+    lengths.shape = (n,), dtype=int32.
+    """
+    if len(series) == 0:
+        return np.empty((0, max_len), dtype=np.uint8), np.empty((0,), dtype=np.int32)
+    # Convert to Python list of bytes
+    py_list = series.fillna('').to_arrow().to_pylist()
+    n = len(py_list)
+    arr = np.zeros((n, max_len), dtype=np.uint8)
+    lengths = np.zeros((n,), dtype=np.int32)
+    for i, s in enumerate(py_list):
+        if s is None:
+            continue
+        if isinstance(s, str):
+            b = s.encode('utf8', errors='ignore')[:max_len]
+        else:
+            # bytes-like
+            b = bytes(s)[:max_len]
+        arr[i, :len(b)] = np.frombuffer(b, dtype=np.uint8)
+        lengths[i] = len(b)
+    return arr, lengths
 
 
 @cuda.jit
@@ -237,6 +262,56 @@ Q = 2    # Value length of q-grams for Jaccard and Dice comparison function
 def get_q_grams(s, q):
     """Generate a set of q-grams (substrings of length q) from a string."""
     return {s[i:i+q] for i in range(len(s) - q + 1)}
+
+
+def _digits_only(val):
+    """Return only decimal digits from *val* while handling missing inputs."""
+    if val is None:
+        return ''
+    if isinstance(val, bytes):
+        try:
+            val = val.decode('utf-8', errors='ignore')
+        except Exception:
+            return ''
+    return ''.join(ch for ch in str(val) if '0' <= ch <= '9')
+
+
+def gender_comp(val1, val2):
+    """Exact comparison on gender (case-insensitive first character match)."""
+    if not val1 or not val2:
+        return 0.0
+    g1 = str(val1).strip().lower()
+    g2 = str(val2).strip().lower()
+    if not g1 or not g2:
+        return 0.0
+    return 1.0 if g1[0] == g2[0] else 0.0
+
+
+def date_digits_comp(val1, val2):
+    """Compare dates by their digit-only representation (e.g., 19800504)."""
+    d1 = _digits_only(val1)
+    d2 = _digits_only(val2)
+    if len(d1) < 6 or len(d2) < 6:
+        return 0.0
+    return 1.0 if d1 == d2 else 0.0
+
+
+def postcode_exact_comp(val1, val2):
+    """Exact comparison for postcode after stripping whitespace."""
+    p1 = _digits_only(val1)
+    p2 = _digits_only(val2)
+    if len(p1) < 3 or len(p2) < 3:
+        return 0.0
+    return 1.0 if p1 == p2 else 0.0
+
+
+def phone_suffix_comp(val1, val2, min_digits=7):
+    """Compare phone numbers using their digit-only suffix of length *min_digits*."""
+    d1 = _digits_only(val1)
+    d2 = _digits_only(val2)
+    if len(d1) < min_digits or len(d2) < min_digits:
+        return 0.0
+    return 1.0 if d1[-min_digits:] == d2[-min_digits:] else 0.0
 
 # =============================================================================
 # First the basic functions to compare attribute values
@@ -546,10 +621,44 @@ def edit_dist_sim_comp(val1, val2):
     return 1.0 - float(dist) / float(maxlen)
 
 
-def prepare_sets(listA, listB, q=2):
-    setsA = [get_q_grams(s, q) for s in listA]
-    setsB = [get_q_grams(s, q) for s in listB]
-    return setsA, setsB
+    return arr, lengths
+
+def _series_to_bitpacked_qgrams_gpu(series, q=Q):
+    """Convert cuDF string Series to CuPy array of bit-packed q-grams."""
+    if len(series) == 0:
+        return cupy.empty((0, 1), dtype=cupy.uint32) # Return empty array with correct dtype
+
+    # Convert cuDF Series to Python list of strings
+    py_list = series.fillna('').to_arrow().to_pylist()
+
+    # Generate q-grams for each string
+    qgrams_list = [get_q_grams(s, q) for s in py_list]
+
+    # Create a vocabulary of all unique q-grams
+    all_qgrams = set().union(*qgrams_list)
+    qgram_to_id = {qg: i for i, qg in enumerate(sorted(list(all_qgrams)))}
+
+    # Determine the number of uint32 words needed for bit-packing
+    num_qgrams = len(qgram_to_id)
+    num_words = (num_qgrams + 31) // 32 # Each uint32 can hold 32 bits
+
+    # Create a CuPy array for bit-packed q-grams
+    bitpacked_qgrams_cupy = cupy.zeros((len(py_list), num_words), dtype=cupy.uint32)
+
+    # Populate the bit-packed array
+    for i, qgrams_set in enumerate(qgrams_list):
+        for qg in qgrams_set:
+            qg_id = qgram_to_id[qg]
+            word_idx = qg_id // 32
+            bit_idx = qg_id % 32
+            bitpacked_qgrams_cupy[i, word_idx] |= (1 << bit_idx)
+
+    return bitpacked_qgrams_cupy
+
+def prepare_sets(listA, listB, q=Q):
+    setsA_bitpacked = _series_to_bitpacked_qgrams_gpu(listA, q)
+    setsB_bitpacked = _series_to_bitpacked_qgrams_gpu(listB, q)
+    return setsA_bitpacked, setsB_bitpacked
 
 
 def jaro_winkler_comp_gpu(listA, listB):
@@ -558,17 +667,39 @@ def jaro_winkler_comp_gpu(listA, listB):
     return calculate_jaro_winkler_pairwise_gpu(arrA, lenA, arrB, lenB)
 
 def dice_comp_gpu(listA, listB):
-    setsA, setsB = prepare_sets(listA, listB, q=2)
+    setsA, setsB = prepare_sets(listA, listB, q=Q)
     return calculate_dice_similarity_gpu_pairwise(setsA, setsB)
 
 def jaccard_comp_gpu(listA, listB):
-    setsA, setsB = prepare_sets(listA, listB, q=2)
+    setsA, setsB = prepare_sets(listA, listB, q=Q)
     return calculate_jaccard_similarity_gpu_pairwise(setsA, setsB)
 
 def levenshtein_comp_gpu(listA, listB):
     arrA, lenA = _series_to_padded_uint8(listA)
     arrB, lenB = _series_to_padded_uint8(listB)
     return calculate_levenshtein_pairwise_gpu(arrA, lenA, arrB, lenB)
+
+def run_exact_comp_gpu(listA, listB):
+    """Convenience wrapper used by tests to run the exact comparison on GPU data."""
+    colA = listA.fillna('')
+    colB = listB.fillna('')
+    return (colA == colB).astype('float32')
+
+def run_jaccard_gpu(listA, listB, q=Q):
+    """Helper for tests: compute Jaccard similarity using the GPU kernels."""
+    colA = listA.fillna('')
+    colB = listB.fillna('')
+    setsA, setsB = prepare_sets(colA, colB, q=q)
+    sims = calculate_jaccard_similarity_gpu_pairwise(setsA, setsB)
+    return cudf.Series(sims)
+
+def run_dice_gpu(listA, listB, q=Q):
+    """Helper for tests: compute Dice similarity using the GPU kernels."""
+    colA = listA.fillna('')
+    colB = listB.fillna('')
+    setsA, setsB = prepare_sets(colA, colB, q=q)
+    sims = calculate_dice_similarity_gpu_pairwise(setsA, setsB)
+    return cudf.Series(sims)
 
 # -----------------------------------------------------------------------------
 
@@ -597,14 +728,32 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
     print(f'  Comparing attribute values for candidate pairs chunk {chunk_num} (using native cudf and custom kernels where possible)...')
     sys.stdout.flush()
     
-    gpu_attrs = set()
+    gpu_attrs_char = set()
+    gpu_attrs_qgram = set()
+    # Map both CPU and GPU function variants to the same buffer-preparation logic.
+    char_gpu_funcs = {
+        jaro_winkler_comp,
+        edit_dist_sim_comp,
+        jaro_winkler_comp_gpu,
+        levenshtein_comp_gpu,
+    }
+    qgram_gpu_funcs = {
+        jaccard_comp,
+        dice_comp,
+        jaccard_comp_gpu,
+        dice_comp_gpu,
+    }
     for comp_funct, aA, aB in attr_comp_list:
-        if comp_funct in (jaro_winkler_comp, edit_dist_sim_comp, jaccard_comp, dice_comp):
-            gpu_attrs.add((aA, aB))
+        if comp_funct in char_gpu_funcs:
+            gpu_attrs_char.add((aA, aB))
+        if comp_funct in qgram_gpu_funcs:
+            gpu_attrs_qgram.add((aA, aB))
 
-    gpu_buffers = {}
+    char_gpu_buffers = {}
+    qgram_gpu_buffers = {}
+
     if USE_GPU_COMPARISON:
-        for aA, aB in gpu_attrs:
+        for aA, aB in gpu_attrs_char:
             colA = merged_gdf[aA + '_A'].fillna('')
             colB = merged_gdf[aB + '_B'].fillna('')
             arrA, lenA = _series_to_padded_uint8(colA, max_len=MAX_STRING_LEN)
@@ -614,7 +763,15 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
             d_lenA = cuda.to_device(lenA)
             d_arrB = cuda.to_device(arrB)
             d_lenB = cuda.to_device(lenB)
-            gpu_buffers[(aA, aB)] = (d_arrA, d_lenA, d_arrB, d_lenB)
+            char_gpu_buffers[(aA, aB)] = (d_arrA, d_lenA, d_arrB, d_lenB)
+
+        for aA, aB in gpu_attrs_qgram:
+            colA = merged_gdf[aA + '_A'].fillna('')
+            colB = merged_gdf[aB + '_B'].fillna('')
+            d_matA, d_matB = prepare_sets(colA, colB, q=Q)
+            qgram_gpu_buffers[(aA, aB)] = (d_matA, d_matB)
+
+    sim_vectors_list = []
 
     for comp_funct, attr_nameA, attr_nameB in attr_comp_list:
         col_A = merged_gdf[attr_nameA + '_A'].fillna('')
@@ -623,10 +780,10 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
         if comp_funct == exact_comp:
             sim_col = (col_A == col_B).astype('float32')
 
-        elif USE_GPU_COMPARISON and comp_funct == jaccard_comp:
+        elif USE_GPU_COMPARISON and comp_funct in (jaccard_comp, jaccard_comp_gpu):
             try:
-                d_arrA, d_lenA, d_arrB, d_lenB = gpu_buffers[(attr_nameA, attr_nameB)]
-                sims = calculate_jaccard_similarity_gpu_pairwise(d_arrA, d_lenA, d_arrB, d_lenB)
+                d_matA, d_matB = qgram_gpu_buffers[(attr_nameA, attr_nameB)]
+                sims = calculate_jaccard_similarity_gpu_pairwise(d_matA, d_matB)
                 sim_col = cudf.Series(sims)
             except Exception:
                 print('    NOTE: GPU path failed for Jaccard; using CPU fallback.')
@@ -636,10 +793,10 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [jaccard_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct == dice_comp:
+        elif USE_GPU_COMPARISON and comp_funct in (dice_comp, dice_comp_gpu):
             try:
-                d_arrA, d_lenA, d_arrB, d_lenB = gpu_buffers[(attr_nameA, attr_nameB)]
-                sims = calculate_dice_similarity_gpu_pairwise(d_arrA, d_lenA, d_arrB, d_lenB)
+                d_matA, d_matB = qgram_gpu_buffers[(attr_nameA, attr_nameB)]
+                sims = calculate_dice_similarity_gpu_pairwise(d_matA, d_matB)
                 sim_col = cudf.Series(sims)
             except Exception:
                 print('    NOTE: GPU path failed for Dice; using CPU fallback.')
@@ -649,9 +806,9 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [dice_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct == jaro_winkler_comp:
+        elif USE_GPU_COMPARISON and comp_funct in (jaro_winkler_comp, jaro_winkler_comp_gpu):
             try:
-                d_arrA, d_lenA, d_arrB, d_lenB = gpu_buffers[(attr_nameA, attr_nameB)]
+                d_arrA, d_lenA, d_arrB, d_lenB = char_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_jaro_winkler_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB)
                 sim_col = cudf.Series(sims)
             except Exception:
@@ -662,9 +819,9 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [jaro_winkler_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct == edit_dist_sim_comp:
+        elif USE_GPU_COMPARISON and comp_funct in (edit_dist_sim_comp, levenshtein_comp_gpu):
             try:
-                d_arrA, d_lenA, d_arrB, d_lenB = gpu_buffers[(attr_nameA, attr_nameB)]
+                d_arrA, d_lenA, d_arrB, d_lenB = char_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_levenshtein_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB)
                 sim_col = cudf.Series(sims)
             except Exception:
@@ -694,7 +851,14 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
 
     # 4. Assemble the final DataFrame for the chunk
     sim_vectors_gdf = cudf.concat(sim_vectors_list, axis=1)
-    sim_vectors_gdf.columns = [f'sim_{i}' for i in range(len(attr_comp_list))]
+    sim_column_names = []
+    for func_idx, (_, attr_nameA, attr_nameB) in enumerate(attr_comp_list):
+        if attr_nameA == attr_nameB:
+            sim_column_names.append(f'sim_{attr_nameA}')
+        else:
+            sim_column_names.append(f'sim_{attr_nameA}_{attr_nameB}')
+
+    sim_vectors_gdf.columns = sim_column_names
     sim_vectors_gdf['rec_id_A'] = merged_gdf['rec_id_A']
     sim_vectors_gdf['rec_id_B'] = merged_gdf['rec_id_B']
 
@@ -769,15 +933,15 @@ def compare_pairs(pairs_gdf, recA_gdf, recB_gdf, attr_comp_list):
         return cudf.DataFrame()
 
     all_sim_vectors_gdf = []
-    BATCH_SIZE = 10000  # Process 10,000 pairs at a time
+    BATCH_SIZE = 1_000_000  # Process 1,000,000 pairs at a time
     chunk_num = 1
 
     recA_gdf_renamed = recA_gdf.add_suffix('_A')
     recB_gdf_renamed = recB_gdf.add_suffix('_B')
 
-    for i in range(0, len(pairs_gdf), chunk_size):
-        # Get a chunk of the pairs DataFrame
-        pairs_chunk_gdf = pairs_gdf.iloc[i:i + chunk_size]
+    for i in range(0, len(pairs_gdf), BATCH_SIZE):
+        # Chunk the pair list to limit the size of the intermediate cudf frame.
+        pairs_chunk_gdf = pairs_gdf.iloc[i:i + BATCH_SIZE]
         
         # Convert just the chunk to a list of tuples for _process_chunk
         pair_buffer_chunk = [tuple(x) for x in pairs_chunk_gdf.to_records(index=False)]

@@ -19,6 +19,7 @@ the following steps:
 6.  **Save Results**: Saves the final set of matched pairs to a CSV file.
 """
 
+import argparse
 import time
 import logging
 import loadDataset
@@ -30,7 +31,7 @@ import cudf
 import saveLinkResult
 from config import LOG_LEVEL, LOG_FORMAT
 
-# conda run -n rapids-25.08 python3 recordLinkage.py
+# conda run -n rapids-rl python src/recordLinkage.py very-dirty_100000
 
 # --- Setup Logging ---
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
@@ -44,19 +45,51 @@ def main():
     Orchestrates the record linkage workflow from data loading to evaluation and
     saving the final results.
     """
-    # Variable names for loading datasets
-    datasetA_name = './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv'
-    datasetB_name = './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv'
-    truthfile_name = './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv'
+    parser = argparse.ArgumentParser(description='GPU-based record linkage pipeline.')
+    parser.add_argument(
+        'dataset',
+        nargs='?',
+        default='clean_100000',
+        help='Dataset preset to use (e.g. -clean_100000, -very-dirty_100000, clean_100000).',
+    )
+    args = parser.parse_args()
+
+    dataset_key = args.dataset.lstrip('-').lower()
+    dataset_configs = {
+        'clean_100000': {
+            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-A-100000.csv',
+            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-B-100000.csv',
+            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-true-matches-100000.csv',
+        },
+        'very-dirty_100000': {
+            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv',
+            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv',
+            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv',
+        },
+    }
+    if dataset_key not in dataset_configs:
+        available = ', '.join(sorted(dataset_configs.keys()))
+        raise ValueError(f'Unknown dataset preset "{dataset_key}". Available options: {available}')
+
+    datasetA_name = dataset_configs[dataset_key]['datasetA_name']
+    datasetB_name = dataset_configs[dataset_key]['datasetB_name']
+    truthfile_name = dataset_configs[dataset_key]['truthfile_name']
 
     # The list of tuples (comparison function, attribute name in record A,
     # attribute name in record B)
-    approx_comp_funct_list = [(comparison.jaccard_comp_gpu, 'first_name', 'first_name'),
-                              (comparison.dice_comp_gpu, 'middle_name', 'middle_name'),
-                              (comparison.jaro_winkler_comp_gpu, 'last_name', 'last_name'),
-                              (comparison.levenshtein_comp_gpu, 'suburb', 'suburb'),
-                              (comparison.exact_comp, 'state', 'state'),
-                             ]
+    # Prefer GPU-enabled comparison functions to keep large batches on device.
+    approx_comp_funct_list = [
+        (comparison.jaccard_comp_gpu, 'first_name', 'first_name'),
+        (comparison.dice_comp_gpu, 'middle_name', 'middle_name'),
+        (comparison.jaro_winkler_comp_gpu, 'last_name', 'last_name'),
+        (comparison.levenshtein_comp_gpu, 'street_address', 'street_address'),
+        (comparison.levenshtein_comp_gpu, 'suburb', 'suburb'),
+        (comparison.exact_comp, 'state', 'state'),
+        (comparison.gender_comp, 'gender', 'gender'),
+        (comparison.date_digits_comp, 'birth_date', 'birth_date'),
+        (comparison.postcode_exact_comp, 'postcode', 'postcode'),
+        (comparison.phone_suffix_comp, 'phone', 'phone'),
+    ]
 
     attr_list = ['first_name', 'middle_name', 'last_name', 'gender', 'birth_date', 'street_address', 'suburb', 'postcode', 'state', 'phone']
 
@@ -122,6 +155,90 @@ def main():
     sim_vectors_gdf = comparison.compare_pairs(candidate_pairs_gdf, recA_gdf, recB_gdf, \
                                                approx_comp_funct_list)
 
+    dataset_category = 'clean' if 'clean-' in datasetA_name else \
+                       'very_dirty' if 'very-dirty-' in datasetA_name else \
+                       'unknown'
+
+    def _apply_high_precision_filters(sim_vectors):
+        """Prune candidate pairs that lack agreement on high-signal identifiers."""
+        required_cols = {
+            'sim_postcode',
+            'sim_phone',
+            'sim_birth_date',
+            'sim_gender',
+            'sim_first_name',
+            'sim_last_name',
+            'sim_street_address',
+            'sim_suburb',
+        }
+        if sim_vectors.empty:
+            return sim_vectors
+
+        available_cols = set(sim_vectors.columns)
+        if not required_cols.issubset(available_cols):
+            logging.warning('Precision filters skipped (missing columns: %s)',
+                            ', '.join(sorted(required_cols - available_cols)))
+            return sim_vectors
+
+        first_col = sim_vectors['sim_first_name']
+        last_col = sim_vectors['sim_last_name']
+        postcode_col = sim_vectors['sim_postcode']
+        suburb_col = sim_vectors['sim_suburb']
+        address_col = sim_vectors['sim_street_address']
+        phone_col = sim_vectors['sim_phone']
+        birth_col = sim_vectors['sim_birth_date']
+        gender_col = sim_vectors['sim_gender']
+
+        if dataset_category == 'clean':
+            first_good = first_col >= 0.75
+            last_good = last_col >= 0.90
+            location_strong = (postcode_col >= 0.99) & (suburb_col >= 0.95)
+            address_strong = address_col >= 0.90
+            suburb_tight = suburb_col >= 0.97
+            phone_strong = phone_col >= 0.90
+            birth_strong = birth_col >= 0.99
+            gender_match = gender_col >= 0.90
+
+            keep_mask = (
+                (location_strong & last_good & (first_good | address_strong | phone_strong | birth_strong | gender_match))
+                | (phone_strong & last_good & (first_good | gender_match))
+                | (birth_strong & last_good & (first_good | gender_match))
+                | (address_strong & suburb_tight & last_good)
+            )
+
+        elif dataset_category == 'very_dirty':
+            first_loose = first_col >= 0.70
+            last_loose = last_col >= 0.80
+            postcode_relaxed = postcode_col >= 0.95
+            suburb_relaxed = suburb_col >= 0.90
+            address_relaxed = address_col >= 0.82
+            phone_relaxed = phone_col >= 0.85
+            birth_relaxed = birth_col >= 0.99
+            gender_relaxed = gender_col >= 0.95
+
+            location_combo = postcode_relaxed & suburb_relaxed & last_loose
+            phone_combo = phone_relaxed & first_loose & last_loose
+            address_combo = address_relaxed & suburb_relaxed & last_loose
+            birth_combo = birth_relaxed & last_loose & (first_loose | gender_relaxed)
+
+            keep_mask = location_combo | phone_combo | address_combo | birth_combo
+        else:
+            postcode_match = postcode_col >= 0.99
+            phone_match = phone_col >= 0.85
+            birthdate_name_match = (birth_col >= 0.99) & ((first_col >= 0.70) | (last_col >= 0.80))
+            address_match = (address_col >= 0.85) & (suburb_col >= 0.95)
+            gender_aux = (gender_col >= 0.99) & (last_col >= 0.80)
+            keep_mask = postcode_match | phone_match | birthdate_name_match | address_match | gender_aux
+
+        filtered = sim_vectors[keep_mask]
+        logging.info('Precision filters (%s) kept %d of %d candidate pairs (%.2f%%).',
+                     dataset_category,
+                     len(filtered), len(sim_vectors),
+                     100.0 * len(filtered) / max(1, len(sim_vectors)))
+        return filtered.reset_index(drop=True)
+
+    sim_vectors_gdf = _apply_high_precision_filters(sim_vectors_gdf)
+
     comparison_time = time.time() - start_time
     logging.info(f"Data comparison took {comparison_time:.3f} seconds.")
 
@@ -157,4 +274,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
