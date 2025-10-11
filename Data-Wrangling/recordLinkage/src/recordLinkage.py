@@ -61,6 +61,11 @@ def main():
             'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-B-100000.csv',
             'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-true-matches-100000.csv',
         },
+        'little-dirty_100000': {
+            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-A-100000.csv',
+            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-B-100000.csv',
+            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-true-matches-100000.csv',
+        },
         'very-dirty_100000': {
             'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv',
             'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv',
@@ -155,9 +160,12 @@ def main():
     sim_vectors_gdf = comparison.compare_pairs(candidate_pairs_gdf, recA_gdf, recB_gdf, \
                                                approx_comp_funct_list)
 
-    dataset_category = 'clean' if 'clean-' in datasetA_name else \
-                       'very_dirty' if 'very-dirty-' in datasetA_name else \
-                       'unknown'
+    dataset_category = (
+        'clean' if 'clean-' in datasetA_name else
+        'little_dirty' if 'little-dirty-' in datasetA_name else
+        'very_dirty' if 'very-dirty-' in datasetA_name else
+        'unknown'
+    )
 
     def _apply_high_precision_filters(sim_vectors):
         """Prune candidate pairs that lack agreement on high-signal identifiers."""
@@ -204,6 +212,24 @@ def main():
                 | (phone_strong & last_good & (first_good | gender_match))
                 | (birth_strong & last_good & (first_good | gender_match))
                 | (address_strong & suburb_tight & last_good)
+            )
+
+        elif dataset_category == 'little_dirty':
+            first_mid = first_col >= 0.70
+            last_mid = last_col >= 0.85
+            postcode_mid = postcode_col >= 0.97
+            suburb_mid = suburb_col >= 0.92
+            address_mid = address_col >= 0.88
+            phone_mid = phone_col >= 0.88
+            birth_mid = birth_col >= 0.97
+            gender_mid = gender_col >= 0.88
+
+            keep_mask = (
+                (postcode_mid & suburb_mid & last_mid & (first_mid | address_mid | phone_mid | birth_mid | gender_mid))
+                | (address_mid & suburb_mid & last_mid)
+                | (phone_mid & last_mid & (first_mid | gender_mid))
+                | (birth_mid & last_mid & (first_mid | gender_mid))
+                | ((first_mid & last_mid) & (address_mid | phone_mid | birth_mid | postcode_mid))
             )
 
         elif dataset_category == 'very_dirty':

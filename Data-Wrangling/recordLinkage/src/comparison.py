@@ -1,12 +1,10 @@
 """GPU-accelerated comparison utilities used throughout the linkage pipeline."""
 
-import code
 import os
 import numpy as np
 import sys
 from collections import Counter
 import cudf
-import cugraph
 import cupy
 from numba_kernels import (
     calculate_jaccard_similarity_gpu_pairwise,
