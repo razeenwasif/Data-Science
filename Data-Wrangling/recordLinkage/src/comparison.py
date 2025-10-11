@@ -15,7 +15,6 @@ from numba_kernels import (
 
 from config import USE_GPU_COMPARISON
 from numba import cuda
-from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
 MAX_STRING_LEN = 256
@@ -247,8 +246,6 @@ def levenshtein_similarity_kernel(s1, s2):
 
 
 
-
-from comparison_kernels import compare_kernel
 
 """ Module with functionalities for comparison of attribute values as well as
     record pairs. The record pair comparison function will return a dictionary

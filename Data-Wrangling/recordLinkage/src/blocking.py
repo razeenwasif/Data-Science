@@ -5,7 +5,6 @@
 
 import random
 import sys
-import comparison
 import numpy as np
 import cupy
 import cudf

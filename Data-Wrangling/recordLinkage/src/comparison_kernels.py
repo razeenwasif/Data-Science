@@ -1,17 +1,8 @@
 # --- filename: comparison.py ---
-import os
 import sys
 import numpy as np
-from collections import Counter
 import cudf
-import cupy
 from numba import cuda
-from numba_kernels import (
-    calculate_jaccard_similarity_gpu_pairwise,
-    calculate_dice_similarity_gpu_pairwise,
-    calculate_jaro_winkler_pairwise_gpu,
-    calculate_levenshtein_pairwise_gpu,
-)
 
 MAX_STRING_LEN = 128
 Q = 2
@@ -364,4 +355,3 @@ def compare_kernel(s1, s2, out, comp_funct):
     i = cuda.grid(1)
     if i < s1.size:
         out[i] = comp_funct(s1[i], s2[i])
-

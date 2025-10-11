@@ -1,8 +1,6 @@
 # === Add this near the end of numba_kernels.py ===
 import numpy as np
-import numba as nb
-from numba import cuda, uint32
-import math
+from numba import cuda
 
 @cuda.jit
 def _jaro_winkler_kernel(arr1, len1, arr2, len2, out, max_len):
@@ -270,4 +268,3 @@ def calculate_allpairs_jaccard_gpu(d_matA, d_matB, batch_m=1024, threads=(16, 16
         _allpairs_jaccard_bitpacked[(blocks_x, blocks_y), (threads_x, threads_y)](d_matA, d_B_batch, d_out)
         out_full[:, start:end] = d_out.copy_to_host()
     return out_full
-
