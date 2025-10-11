@@ -207,21 +207,24 @@ def main():
             )
 
         elif dataset_category == 'very_dirty':
-            first_loose = first_col >= 0.70
-            last_loose = last_col >= 0.80
-            postcode_relaxed = postcode_col >= 0.95
-            suburb_relaxed = suburb_col >= 0.90
-            address_relaxed = address_col >= 0.82
-            phone_relaxed = phone_col >= 0.85
-            birth_relaxed = birth_col >= 0.99
-            gender_relaxed = gender_col >= 0.95
+            first_loose = first_col >= 0.60
+            last_loose = last_col >= 0.70
+            postcode_relaxed = postcode_col >= 0.88
+            suburb_relaxed = suburb_col >= 0.80
+            address_relaxed = address_col >= 0.75
+            phone_relaxed = phone_col >= 0.78
+            birth_relaxed = birth_col >= 0.90
+            gender_relaxed = gender_col >= 0.85
 
-            location_combo = postcode_relaxed & suburb_relaxed & last_loose
-            phone_combo = phone_relaxed & first_loose & last_loose
-            address_combo = address_relaxed & suburb_relaxed & last_loose
-            birth_combo = birth_relaxed & last_loose & (first_loose | gender_relaxed)
+            location_core = postcode_relaxed & suburb_relaxed
 
-            keep_mask = location_combo | phone_combo | address_combo | birth_combo
+            keep_mask = (
+                (location_core & (last_loose | address_relaxed | phone_relaxed | birth_relaxed | first_loose | gender_relaxed))
+                | (address_relaxed & suburb_relaxed & (last_loose | first_loose | phone_relaxed | birth_relaxed))
+                | (phone_relaxed & (last_loose | first_loose) & (location_core | address_relaxed | gender_relaxed))
+                | (birth_relaxed & (last_loose | first_loose | gender_relaxed))
+                | ((first_loose & last_loose) & (location_core | address_relaxed | phone_relaxed | birth_relaxed))
+            )
         else:
             postcode_match = postcode_col >= 0.99
             phone_match = phone_col >= 0.85
