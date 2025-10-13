@@ -1,7 +1,7 @@
 # Record Linkage GPU Pipeline
 
 ## Overview
-This project implements a GPU-accelerated record linkage workflow that loads two person-level datasets, blocks records to curtail comparisons, computes similarity vectors, classifies matches with a cuML-based random forest, evaluates metrics, and writes the predicted matches to `out/matches.csv`. The code is organised inside `src/` with modular steps you can customise for different linkage scenarios.
+This project implements a GPU-accelerated record linkage workflow that loads two person-level datasets, blocks records to curtail comparisons, computes similarity vectors, classifies matches with a cuML-based random forest, evaluates metrics, and writes the predicted matches to `out/record_linkage_matches.csv`. The entire pipeline is now configured via `config/pipeline.toml`, so you can drop in your datasets, adjust blocking/comparison/classification settings, and run the linker without diving into the source code.
 
 ## Prerequisites
 - NVIDIA GPU with a supported CUDA driver (CUDA 12.x as exported in `conda_env.txt`).
@@ -17,59 +17,61 @@ conda activate rapids-rl
 If you need a leaner environment, start from `rapidsai` nightly packages that match your CUDA version and add dependencies listed in the spec file (cuDF, cuML, cuGraph, FAISS, CuPy, rapidfuzz, numba, etc.).
 
 ## Repository layout
-- `src/recordLinkage.py` – entry point orchestrating the six pipeline stages.
-- `src/config.py` – high-level knobs (logging, q-gram length, GPU toggle, classifier size).
+- `config/pipeline.toml` – single source of truth for datasets, blocking, comparisons, filters, and classifier settings.
+- `src/recordLinkage.py` – CLI entry point orchestrating the six pipeline stages using the declarative config.
+- `src/pipeline_config.py` – config parser and validation helpers.
+- `src/config.py` – logging defaults, q-gram length, and a global GPU comparison flag (overridden at runtime by the CLI).
 - `src/blocking.py` – blocking strategies, including ANN-based candidate generation.
 - `src/comparison.py` – similarity functions with GPU and CPU implementations.
 - `src/classification.py` – cuML random forest training, threshold selection, and scoring.
 - `src/evaluation.py` – blocking and linkage quality metrics.
 - `src/saveLinkResult.py` – writes the match set to CSV.
 - `src/datasets/` – default CSV inputs supplied for the assignment.
-- `out/` – pipeline output directory (`matches.csv` is created here).
+- `out/` – pipeline output directory (the default run writes `record_linkage_matches.csv`).
 
 ## Running the pipeline
+List the dataset presets available in `config/pipeline.toml`:
 ```bash
-python src/recordLinkage.py assignment_datasets
+python src/recordLinkage.py --list-datasets
 ```
-The positional argument selects a dataset preset. The following presets are predefined inside `recordLinkage.py`:
-- `assignment_datasets` (default if omitted)
-- `clean_100000`
-- `little-dirty_100000`
-- `very-dirty_100000`
 
-Each preset maps to three CSV files (`datasetA`, `datasetB`, and `truthfile`). To add new data, extend the `dataset_configs` dictionary with your own key and file paths.
+Run a specific preset (the default dataset is picked from the config if `--dataset` is omitted):
+```bash
+python src/recordLinkage.py --dataset assignment_datasets
+```
+
+Common CLI overrides:
+- `--config path/to/pipeline.toml` – use an alternate configuration file.
+- `--output ./out/custom_results.csv` – change the output path without editing the config.
+- `--skip-filters` – bypass the precision filters while tuning thresholds.
+- `--no-gpu` / `--use-gpu` – force CPU or GPU similarity comparisons.
 
 ## Core settings to tweak
+### `config/pipeline.toml`
+- `[defaults]` – shared settings such as the record ID column, attribute list, and default output CSV.
+- `[[datasets]]` – dataset presets referencing your CSVs. Each entry selects comparison, blocking, filter, and classification profiles (or overrides specific parameters like ANN `k`).
+- `[blocking.defaults]` – base partition attributes and ANN parameters applied unless a dataset overrides them.
+- `[comparison]` – named profiles that map attributes to similarity functions (GPU or CPU implementations from `comparison.py`).
+- `[filters]` – reusable high-precision filter profiles. Each profile defines mandatory conditions (`enforce_all`) and a set of rule groups that are OR-combined.
+- `[classification]` – classifier defaults (`n_estimators`, `base_threshold`) and profiles that set precision/recall targets and threshold offsets.
+
 ### `src/config.py`
-- `Q_GRAM_LENGTH` – length of q-grams for Jaccard/Dice similarities. Higher values tighten comparisons but require more exact matches.
-- `ML_N_ESTIMATORS` – number of trees in the cuML random forest. Increase for better recall at the cost of GPU memory and runtime.
-- `LOG_LEVEL` / `LOG_FORMAT` – standard Python logging settings used across modules.
-- `USE_GPU_COMPARISON` – disable to force CPU comparisons (useful for development without a GPU). GPU kernels fall back to CPU automatically on failure, but explicit disable keeps everything on host.
+- Logging configuration (`LOG_LEVEL`, `LOG_FORMAT`).
+- `Q_GRAM_LENGTH` for q-gram similarity functions (Jaccard/Dice).
+- `USE_GPU_COMPARISON` default; the CLI overrides this when `--use-gpu` or `--no-gpu` is supplied.
 
-### Blocking controls (`src/recordLinkage.py`)
-- `partition_attr` and `ann_attrs` determine the blocking scheme. Adjust attribute lists to better capture your domain (e.g., include postcode for geographic clustering).
-- `K_NEIGHBORS` and `ann_sim_threshold` define the ANN search breadth. Larger `k` and lower thresholds trade runtime for recall.
-- Dataset-specific overrides are applied before candidate generation. Add your own category or tweak the per-category values to balance speed and quality.
-
-### Comparison controls (`src/recordLinkage.py` and `src/comparison.py`)
-- `approx_comp_funct_list` defines which similarity function is applied to each attribute. You can add/remove tuples or swap in CPU-only helpers from `comparison.py`.
-- `attr_list` controls which columns are loaded from the CSV files. Keep it in sync with your data schema.
-- To change GPU memory usage, adjust `MAX_STRING_LEN` in `comparison.py` for long text fields.
-
-### Classification controls (`src/classification.py`)
-- `supervisedMLClassify` accepts `n_estimators` and `threshold_offset`. The main script already passes `threshold_offset` based on dataset category—modify that logic if you introduce new presets.
-- Ratio and depth grids (`ratio_candidates`, `depth_candidates`) govern hyper-parameter search. Expand these lists to explore additional model sizes.
-- To use a deterministic split, change the `random_state` values inside the sampling routines.
-
-### Output and evaluation
-- Results are written by default to `out/matches.csv`. Pass a different path to `saveLinkResult.save_linkage_set` if you want separate runs.
-- Blocking and linkage metrics print to stdout. Redirect to a log file if you want persistent audit trails (`python src/recordLinkage.py ... | tee run.log`).
+### Advanced tuning in code (optional)
+- `src/blocking.py` – extend or swap blocking strategies if you need custom logic beyond the configurable ANN/simple blocking.
+- `src/comparison.py` – add new similarity functions and reference them in `comparison.profiles` within the TOML.
+- `src/classification.py` – modify the ratio/max-depth grids or replace the classifier if you need a different learner.
+- `src/evaluation.py` – adjust or add evaluation metrics.
 
 ## Adding new datasets
-1. Place your CSVs under `src/datasets/` (or another path of your choosing).
-2. Ensure record IDs and attribute names match the expectations in `attr_list`. Columns are converted to lowercase on load.
-3. Update `dataset_configs` with the new key and file paths.
-4. Optionally add a new `dataset_category` to drive specialised blocking thresholds or classifier offsets.
+1. Place your CSVs somewhere accessible (inside or outside the repo).
+2. Duplicate one of the `[[datasets]]` blocks in `config/pipeline.toml` and update the `dataset_a`, `dataset_b`, and `truth` paths.
+3. Point the new dataset at existing profiles (`comparison_profile`, `profile`, `classification_profile`) or create new ones in the corresponding sections.
+4. Adjust overrides such as `blocking_ann_attributes`, `blocking_k_neighbors`, or `output_csv` if the default behaviour does not suit your data.
+5. Run `python src/recordLinkage.py --dataset <your-key>` to validate the configuration. Use `--skip-filters` while exploring new similarity thresholds.
 
 ## Troubleshooting
 - **CUDA out of memory** – reduce ANN `K_NEIGHBORS`, increase filtering thresholds, or disable GPU comparisons to fall back on CPU.
@@ -79,9 +81,9 @@ Each preset maps to three CSV files (`datasetA`, `datasetB`, and `truthfile`). T
 ## Example workflow
 ```bash
 conda activate rapids-rl
-python src/recordLinkage.py clean_100000
+python src/recordLinkage.py --dataset clean_100000
 ```
-Adjust `LOG_LEVEL` in `src/config.py` if you need more verbose logs during the run. After completion, inspect `out/matches.csv` and the logged precision/recall metrics to validate linkage quality. Iterate on the blocking and comparison settings as described above to meet your specific data quality and runtime targets.
+Adjust `LOG_LEVEL` in `src/config.py` if you need more verbose logs during the run, or point to a different config file with `--config`. After completion, inspect the output CSV defined in your dataset entry and the logged precision/recall metrics to validate linkage quality. Iterate on the TOML profiles to meet your data quality and runtime targets.
 
 ## Further Reading
 

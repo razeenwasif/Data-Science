@@ -1,436 +1,475 @@
-"""Main script for performing record linkage on two datasets.
+"""Configurable entry point for the record linkage pipeline.
 
-This script orchestrates the entire record linkage workflow, which consists of
-the following steps:
+This script orchestrates the full workflow:
 
-1.  **Data Loading**: Loads two datasets (A and B) and a truth file containing
-    known matches from CSV files.
-2.  **Blocking**: Reduces the number of candidate pairs by grouping records into
-    blocks based on shared characteristics. This implementation uses a multi-pass
-    approach, combining phonetic and simple blocking methods.
-3.  **Comparison**: Computes similarity vectors for the candidate pairs generated
-    in the blocking step. This is done on the GPU for performance.
-4.  **Classification**: Uses a supervised machine learning model (Random Forest) to
-    classify candidate pairs as matches or non-matches based on their
-    similarity vectors.
-5.  **Evaluation**: Assesses the quality of the linkage by comparing the results
-    against the ground truth data, calculating metrics for both the blocking and
-    classification steps.
-6.  **Save Results**: Saves the final set of matched pairs to a CSV file.
+1. Load datasets and the optional ground-truth match file.
+2. Block/partition the data, then generate candidate pairs via ANN.
+3. Compute similarity vectors for each candidate pair.
+4. Apply optional precision-focused filters to reduce false positives.
+5. Train and apply a supervised classifier to score candidate pairs.
+6. Evaluate the results (when a truth file is available) and write matches to disk.
+
+Pipeline settings are defined in ``config/pipeline.toml``. Users can add or tweak
+dataset presets, adjust blocking/ANN parameters, configure comparison functions,
+and tune classification thresholds without modifying code.
 """
 
-import argparse
-import time
-import logging
-import loadDataset
-import blocking
-import comparison
-import classification
-import evaluation
-import cudf
-import saveLinkResult
-from config import LOG_LEVEL, LOG_FORMAT
+from __future__ import annotations
 
-# conda run -n rapids-rl python src/recordLinkage.py very-dirty_100000
+import argparse
+import logging
+import os
+import time
+from dataclasses import replace
+from typing import List, Optional, Tuple
+
+import cupy
+import cudf
+
+import blocking
+import classification
+import comparison
+import config as global_config
+import evaluation
+import loadDataset
+import saveLinkResult
+from pipeline_config import (
+    ConditionConfig,
+    FilterGroupConfig,
+    FilterProfileConfig,
+    PipelineConfig,
+    PipelineConfigError,
+    load_pipeline_config,
+    list_available_datasets,
+)
+
+# conda run -n rapids-rl python src/recordLinkage.py
 
 # --- Setup Logging ---
-logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
+logging.basicConfig(level=global_config.LOG_LEVEL, format=global_config.LOG_FORMAT)
+LOGGER = logging.getLogger("recordLinkage")
 
-# =============================================================================
-# Main program execution
-# =============================================================================
-def main():
-    """Main program execution.
 
-    Orchestrates the record linkage workflow from data loading to evaluation and
-    saving the final results.
-    """
-    parser = argparse.ArgumentParser(description='GPU-based record linkage pipeline.')
-    parser.add_argument(
-        'dataset',
-        nargs='?',
-        default='assignment_datasets',
-        help='Dataset preset to use (e.g. assignment_datasets, clean_100000, very-dirty_100000).',
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="GPU-accelerated record linkage pipeline powered by RAPIDS."
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--config",
+        default="config/pipeline.toml",
+        help="Path to the pipeline configuration file (default: config/pipeline.toml).",
+    )
+    parser.add_argument(
+        "--dataset",
+        help="Dataset preset key defined inside the configuration file.",
+    )
+    parser.add_argument(
+        "--list-datasets",
+        action="store_true",
+        help="Print the dataset presets found in the configuration file and exit.",
+    )
+    parser.add_argument(
+        "--output",
+        help="Override the output CSV destination defined in the configuration.",
+    )
+    parser.add_argument(
+        "--use-gpu",
+        dest="use_gpu",
+        action="store_true",
+        help="Force GPU comparisons even if the config disables them.",
+    )
+    parser.add_argument(
+        "--no-gpu",
+        dest="use_gpu",
+        action="store_false",
+        help="Disable GPU comparisons regardless of the config defaults.",
+    )
+    parser.add_argument(
+        "--skip-filters",
+        action="store_true",
+        help="Disable high-precision filters (useful when tuning thresholds).",
+    )
+    parser.add_argument(
+        "legacy_dataset",
+        nargs="?",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(use_gpu=None)
+    return parser.parse_args()
 
-    dataset_key = args.dataset.lstrip('-').lower()
-    dataset_configs = {
-        'clean_100000': {
-            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-A-100000.csv',
-            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-B-100000.csv',
-            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-true-matches-100000.csv',
-            'category': 'clean',
-        },
-        'little-dirty_100000': {
-            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-A-100000.csv',
-            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-B-100000.csv',
-            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-true-matches-100000.csv',
-            'category': 'little_dirty',
-        },
-        'very-dirty_100000': {
-            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv',
-            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv',
-            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv',
-            'category': 'very_dirty',
-        },
-        'assignment_datasets': {
-            'datasetA_name': 'src/datasets/data_wrangling_rl1_2025_u7283652.csv',
-            'datasetB_name': 'src/datasets/data_wrangling_rl2_2025_u7283652.csv',
-            'truthfile_name': 'src/datasets/data_wrangling_rlgt_2025_u7283652.csv',
-            'category': 'assignment_dirty',
-        },
-    }
-    if dataset_key not in dataset_configs:
-        available = ', '.join(sorted(dataset_configs.keys()))
-        raise ValueError(f'Unknown dataset preset "{dataset_key}". Available options: {available}')
 
-    dataset_config = dataset_configs[dataset_key]
-    datasetA_name = dataset_config['datasetA_name']
-    datasetB_name = dataset_config['datasetB_name']
-    truthfile_name = dataset_config['truthfile_name']
-    dataset_category = dataset_config.get('category')
-    if not dataset_category:
-        dataset_category = (
-            'clean' if 'clean-' in datasetA_name else
-            'little_dirty' if 'little-dirty-' in datasetA_name else
-            'very_dirty' if 'very-dirty-' in datasetA_name else
-            'unknown'
+def _resolve_dataset_argument(args: argparse.Namespace) -> Optional[str]:
+    """Support both --dataset and the legacy positional dataset argument."""
+    if args.dataset and args.legacy_dataset:
+        LOGGER.warning(
+            "Both --dataset=%s and positional dataset '%s' supplied. "
+            "The --dataset flag takes precedence.",
+            args.dataset,
+            args.legacy_dataset,
+        )
+        return args.dataset
+    if args.dataset:
+        return args.dataset
+    if args.legacy_dataset:
+        LOGGER.info(
+            "Using positional dataset argument '%s'. "
+            "Prefer passing --dataset=<name> for clarity.",
+            args.legacy_dataset,
+        )
+        return args.legacy_dataset
+    return None
+
+
+def _resolve_comparison_pairs(pipeline_cfg: PipelineConfig) -> List[Tuple]:
+    """Convert comparison function names declared in the config into callables."""
+    resolved_pairs: List[Tuple] = []
+    missing_functions: List[str] = []
+
+    for pair_cfg in pipeline_cfg.comparisons:
+        func = getattr(comparison, pair_cfg.function, None)
+        if func is None:
+            missing_functions.append(pair_cfg.function)
+            continue
+        resolved_pairs.append((func, pair_cfg.attr_a, pair_cfg.attr_b))
+
+    if missing_functions:
+        raise PipelineConfigError(
+            "Comparison functions not found in comparison.py: "
+            + ", ".join(sorted(set(missing_functions)))
+        )
+    return resolved_pairs
+
+
+def _full_true_series(length: int) -> cudf.Series:
+    if length == 0:
+        return cudf.Series([], dtype="bool")
+    return cudf.Series(cupy.ones(length, dtype=cupy.bool_))
+
+
+def _evaluate_condition(
+    sim_vectors: cudf.DataFrame,
+    condition: ConditionConfig,
+    missing_columns_cache: set,
+) -> cudf.Series:
+    """Return a boolean mask indicating which rows satisfy the given condition."""
+    column = condition.column
+    if column not in sim_vectors.columns:
+        if column not in missing_columns_cache:
+            LOGGER.warning(
+                "Precision filter skipped for missing column '%s'. "
+                "Consider removing or correcting the condition in the config.",
+                column,
+            )
+            missing_columns_cache.add(column)
+        return _full_true_series(len(sim_vectors))
+
+    col = sim_vectors[column].fillna(0.0)
+    op = condition.operator
+    value = condition.value
+
+    if op == ">=":
+        return col >= value
+    if op == ">":
+        return col > value
+    if op == "<=":
+        return col <= value
+    if op == "<":
+        return col < value
+    if op == "==":
+        return col == value
+    if op == "!=":
+        return col != value
+    raise PipelineConfigError(f"Unsupported operator '{op}' in condition for column {column}")
+
+
+def _combine_group_masks(
+    sim_vectors: cudf.DataFrame,
+    group_cfg: FilterGroupConfig,
+    missing_columns_cache: set,
+) -> cudf.Series:
+    """Evaluate a filter group returning a mask of rows passing the group."""
+    if sim_vectors.empty:
+        return _full_true_series(0)
+
+    all_mask: Optional[cudf.Series] = None
+    for condition in group_cfg.all_conditions:
+        condition_mask = _evaluate_condition(sim_vectors, condition, missing_columns_cache)
+        all_mask = condition_mask if all_mask is None else all_mask & condition_mask
+
+    if all_mask is None:
+        all_mask = _full_true_series(len(sim_vectors))
+
+    if not group_cfg.any_conditions:
+        return all_mask if group_cfg.min_any == 0 else cudf.Series(
+            cupy.zeros(len(sim_vectors), dtype=cupy.bool_)
         )
 
-    # The list of tuples (comparison function, attribute name in record A,
-    # attribute name in record B)
-    # Prefer GPU-enabled comparison functions to keep large batches on device.
-    approx_comp_funct_list = [
-        (comparison.jaccard_comp_gpu, 'first_name', 'first_name'),
-        (comparison.dice_comp_gpu, 'middle_name', 'middle_name'),
-        (comparison.jaro_winkler_comp_gpu, 'last_name', 'last_name'),
-        (comparison.levenshtein_comp_gpu, 'street_address', 'street_address'),
-        (comparison.levenshtein_comp_gpu, 'suburb', 'suburb'),
-        (comparison.exact_comp, 'state', 'state'),
-        (comparison.gender_comp, 'gender', 'gender'),
-        (comparison.date_digits_comp, 'birth_date', 'birth_date'),
-        (comparison.postcode_exact_comp, 'postcode', 'postcode'),
-        (comparison.phone_suffix_comp, 'phone', 'phone'),
-        (comparison.age_similarity_comp, 'current_age', 'current_age'),
-        (comparison.levenshtein_comp_gpu, 'email', 'email'),
+    condition_masks = [
+        _evaluate_condition(sim_vectors, condition, missing_columns_cache).astype("int8")
+        for condition in group_cfg.any_conditions
     ]
+    counts_df = cudf.concat(condition_masks, axis=1)
+    counts = counts_df.sum(axis=1)
+    any_mask = counts >= group_cfg.min_any
+    return all_mask & any_mask
 
-    attr_list = [
-        'first_name',
-        'middle_name',
-        'last_name',
-        'gender',
-        'birth_date',
-        'street_address',
-        'suburb',
-        'postcode',
-        'state',
-        'phone',
-        'current_age',
-        'email',
-    ]
 
-    threshold_offset = 0.01 if dataset_category == 'assignment_dirty' else 0.0
-    min_precision = classification.GLOBAL_MIN_PRECISION
-    min_recall = classification.GLOBAL_MIN_RECALL
-    precision_beta = classification.PRECISION_FOCUSED_BETA
+def _apply_filter_profile(
+    sim_vectors_gdf: cudf.DataFrame,
+    filter_cfg: FilterProfileConfig,
+) -> cudf.DataFrame:
+    """Apply precision filters defined in the configuration."""
+    if sim_vectors_gdf.empty:
+        LOGGER.info("Skipping precision filters (%s); no candidate pairs available.", filter_cfg.name)
+        return sim_vectors_gdf
 
-    if dataset_category == 'very_dirty':
-        threshold_offset = -0.02
-        min_precision = 0.45
-        min_recall = 0.10
-        precision_beta = 1.0
+    if not filter_cfg.enabled:
+        LOGGER.info("Precision filters disabled for profile '%s'.", filter_cfg.name)
+        return sim_vectors_gdf
 
-    # =============================================================================
-    # Step 1: Load the two datasets from CSV files
+    missing_columns_cache: set = set()
+
+    enforce_mask: Optional[cudf.Series] = None
+    for condition in filter_cfg.enforce_all:
+        cond_mask = _evaluate_condition(sim_vectors_gdf, condition, missing_columns_cache)
+        enforce_mask = cond_mask if enforce_mask is None else enforce_mask & cond_mask
+    if enforce_mask is None:
+        enforce_mask = _full_true_series(len(sim_vectors_gdf))
+
+    if not filter_cfg.groups:
+        final_mask = enforce_mask
+    else:
+        group_masks = [
+            _combine_group_masks(sim_vectors_gdf, group_cfg, missing_columns_cache)
+            for group_cfg in filter_cfg.groups
+        ]
+        combined_groups = group_masks[0]
+        for group_mask in group_masks[1:]:
+            combined_groups = combined_groups | group_mask
+        final_mask = enforce_mask & combined_groups
+
+    filtered = sim_vectors_gdf[final_mask]
+    LOGGER.info(
+        "Precision filters (%s) kept %d of %d candidate pairs (%.2f%%).",
+        filter_cfg.name,
+        len(filtered),
+        len(sim_vectors_gdf),
+        100.0 * len(filtered) / max(1, len(sim_vectors_gdf)),
+    )
+    return filtered.reset_index(drop=True)
+
+
+def _cartesian_candidate_pairs(
+    gdf_a: cudf.DataFrame,
+    gdf_b: cudf.DataFrame,
+) -> cudf.DataFrame:
+    """Compute the Cartesian product of two partitions when ANN is disabled."""
+    if gdf_a.empty or gdf_b.empty:
+        return cudf.DataFrame({"rec_id_A": [], "rec_id_B": []})
+
+    tmp_a = gdf_a.reset_index().rename(columns={"index": "rec_id_A"})
+    tmp_b = gdf_b.reset_index().rename(columns={"index": "rec_id_B"})
+    tmp_a["__tmp__"] = 1
+    tmp_b["__tmp__"] = 1
+
+    merged = tmp_a.merge(tmp_b, on="__tmp__", how="inner")
+    result = merged[["rec_id_A", "rec_id_B"]]
+
+    del tmp_a, tmp_b, merged
+    return result
+
+
+def _generate_candidate_pairs(
+    pipeline_cfg: PipelineConfig,
+    recA_gdf: cudf.DataFrame,
+    recB_gdf: cudf.DataFrame,
+) -> cudf.DataFrame:
+    """Run partitioning and ANN candidate generation based on the configuration."""
+    blocking_cfg = pipeline_cfg.blocking
+    partition_attrs = blocking_cfg.partition_attributes
+
     start_time = time.time()
+    if partition_attrs:
+        LOGGER.info("Partitioning datasets by %s", partition_attrs)
+        blocks_A = blocking.simpleBlocking(recA_gdf, partition_attrs)
+        blocks_B = blocking.simpleBlocking(recB_gdf, partition_attrs)
+        common_keys = sorted(set(blocks_A.keys()) & set(blocks_B.keys()))
+    else:
+        LOGGER.info("No partition attributes configured; using a single global block.")
+        blocks_A = {"__all__": recA_gdf.index.to_arrow().to_pylist()}
+        blocks_B = {"__all__": recB_gdf.index.to_arrow().to_pylist()}
+        common_keys = ["__all__"]
 
-    recA_gdf = loadDataset.load_data_set(datasetA_name, 'rec_id', attr_list)
-    recB_gdf = loadDataset.load_data_set(datasetB_name, 'rec_id', attr_list)
-    true_match_set = loadDataset.load_truth_data(truthfile_name)
+    if not common_keys:
+        LOGGER.warning("No overlapping partitions were found; no candidate pairs generated.")
+        return cudf.DataFrame({"rec_id_A": [], "rec_id_B": []})
 
-    loading_time = time.time() - start_time
-    logging.info(f"Data loading took {loading_time:.3f} seconds.")
+    candidate_pairs_list: List[cudf.DataFrame] = []
+    ann_cfg = blocking_cfg.ann
 
-    # -----------------------------------------------------------------------------
-    # Step 2: Block the datasets
-    start_time = time.time()
+    for idx, key in enumerate(common_keys, start=1):
+        LOGGER.info("  Processing partition %d/%d: %s", idx, len(common_keys), key)
+        rec_ids_A = blocks_A[key]
+        rec_ids_B = blocks_B[key]
 
-    # --- Partitioning Pass: simple blocking on state ---
-    logging.info('Partitioning datasets by state...')
-    partition_attr = ['state']
-    state_blocks_A = blocking.simpleBlocking(recA_gdf, partition_attr)
-    state_blocks_B = blocking.simpleBlocking(recB_gdf, partition_attr)
-
-    all_candidate_pairs_list = []
-
-    # --- ANN Candidate Generation within each partition ---
-    logging.info('Running ANN candidate generation within each state partition...')
-    ann_attrs = ['first_name', 'last_name', 'suburb']
-    K_NEIGHBORS = 25
-    ann_sim_threshold = 0.50
-
-    if dataset_category in ('very_dirty', 'assignment_dirty'):
-        ann_attrs = ['first_name', 'last_name', 'street_address', 'suburb']
-        K_NEIGHBORS = 30
-        ann_sim_threshold = 0.48
-    if dataset_category == 'assignment_dirty':
-        ann_attrs = ['first_name', 'last_name', 'street_address', 'suburb', 'email']
-        K_NEIGHBORS = 35
-        ann_sim_threshold = 0.45
-
-    # Get a set of common state keys to iterate over
-    common_states = set(state_blocks_A.keys()) & set(state_blocks_B.keys())
-
-    for i, state_key in enumerate(common_states):
-        logging.info(f'  Processing partition {i+1}/{len(common_states)}: {state_key}')
-
-        rec_ids_A = state_blocks_A[state_key]
-        rec_ids_B = state_blocks_B[state_key]
-
-        # Filter main GDFs to get records for the current state
         temp_gdf_A = recA_gdf.loc[rec_ids_A]
         temp_gdf_B = recB_gdf.loc[rec_ids_B]
 
-        # Generate candidate pairs for the partition using ANN search
-        partition_pairs_gdf = blocking.ann_candidate_generation(
-            temp_gdf_A,
-            temp_gdf_B,
-            k=K_NEIGHBORS,
-            blk_attr_list=ann_attrs,
-            sim_threshold=ann_sim_threshold,
-        )
-        all_candidate_pairs_list.append(partition_pairs_gdf)
-
-    # Combine candidate pairs from all partitions
-    candidate_pairs_gdf = cudf.concat(all_candidate_pairs_list, ignore_index=True)
-    candidate_pairs_gdf = candidate_pairs_gdf.drop_duplicates()
-    
-    logging.info(f"Total candidate pairs generated from ANN blocking: {len(candidate_pairs_gdf)}")
-
-    blocking_time = time.time() - start_time
-    logging.info(f"Data blocking took {blocking_time:.3f} seconds.")
-    # Note: printBlockStatistics is not applicable to the new pair-based approach
-
-    # -----------------------------------------------------------------------------
-    # Step 3: Compare the candidate pairs
-    start_time = time.time()
-
-    sim_vectors_gdf = comparison.compare_pairs(candidate_pairs_gdf, recA_gdf, recB_gdf, \
-                                               approx_comp_funct_list)
-
-    def _apply_high_precision_filters(sim_vectors):
-        """Prune candidate pairs that lack agreement on high-signal identifiers."""
-        required_cols = {
-            'sim_postcode',
-            'sim_phone',
-            'sim_birth_date',
-            'sim_gender',
-            'sim_first_name',
-            'sim_last_name',
-            'sim_street_address',
-            'sim_suburb',
-        }
-        if sim_vectors.empty:
-            return sim_vectors
-
-        available_cols = set(sim_vectors.columns)
-        if not required_cols.issubset(available_cols):
-            logging.warning('Precision filters skipped (missing columns: %s)',
-                            ', '.join(sorted(required_cols - available_cols)))
-            return sim_vectors
-
-        first_col = sim_vectors['sim_first_name']
-        last_col = sim_vectors['sim_last_name']
-        postcode_col = sim_vectors['sim_postcode']
-        suburb_col = sim_vectors['sim_suburb']
-        address_col = sim_vectors['sim_street_address']
-        phone_col = sim_vectors['sim_phone']
-        birth_col = sim_vectors['sim_birth_date']
-        gender_col = sim_vectors['sim_gender']
-        email_col = sim_vectors['sim_email'] if 'sim_email' in available_cols else None
-        age_col = sim_vectors['sim_current_age'] if 'sim_current_age' in available_cols else None
-
-        if dataset_category == 'clean':
-            first_good = first_col >= 0.75
-            last_good = last_col >= 0.90
-            location_strong = (postcode_col >= 0.99) & (suburb_col >= 0.95)
-            address_strong = address_col >= 0.90
-            suburb_tight = suburb_col >= 0.97
-            phone_strong = phone_col >= 0.90
-            birth_strong = birth_col >= 0.99
-            gender_match = gender_col >= 0.90
-
-            keep_mask = (
-                (location_strong & last_good & (first_good | address_strong | phone_strong | birth_strong | gender_match))
-                | (phone_strong & last_good & (first_good | gender_match))
-                | (birth_strong & last_good & (first_good | gender_match))
-                | (address_strong & suburb_tight & last_good)
+        if ann_cfg.enabled:
+            candidate_pairs_gdf = blocking.ann_candidate_generation(
+                temp_gdf_A,
+                temp_gdf_B,
+                k=ann_cfg.k_neighbors,
+                blk_attr_list=ann_cfg.attributes,
+                sim_threshold=ann_cfg.similarity_threshold,
             )
-
-        elif dataset_category == 'little_dirty':
-            first_mid = first_col >= 0.70
-            last_mid = last_col >= 0.85
-            postcode_mid = postcode_col >= 0.97
-            suburb_mid = suburb_col >= 0.92
-            address_mid = address_col >= 0.88
-            phone_mid = phone_col >= 0.88
-            birth_mid = birth_col >= 0.97
-            gender_mid = gender_col >= 0.88
-
-            keep_mask = (
-                (postcode_mid & suburb_mid & last_mid & (first_mid | address_mid | phone_mid | birth_mid | gender_mid))
-                | (address_mid & suburb_mid & last_mid)
-                | (phone_mid & last_mid & (first_mid | gender_mid))
-                | (birth_mid & last_mid & (first_mid | gender_mid))
-                | ((first_mid & last_mid) & (address_mid | phone_mid | birth_mid | postcode_mid))
-            )
-
-        elif dataset_category == 'very_dirty':
-            first_anchor = first_col >= 0.62
-            first_soft = first_col >= 0.55
-            last_anchor = last_col >= 0.72
-            last_soft = last_col >= 0.65
-
-            postcode_anchor = postcode_col >= 0.90
-            postcode_soft = postcode_col >= 0.84
-            suburb_anchor = suburb_col >= 0.82
-            suburb_soft = suburb_col >= 0.74
-            address_anchor = address_col >= 0.75
-            address_soft = address_col >= 0.68
-
-            phone_anchor = phone_col >= 0.78
-            phone_soft = phone_col >= 0.72
-            birth_anchor = birth_col >= 0.90
-            birth_soft = birth_col >= 0.86
-            gender_soft = gender_col >= 0.80
-
-            contact_support = phone_soft | birth_soft
-            contact_anchor = phone_anchor | birth_anchor
-
-            email_soft = None
-            email_anchor = None
-            if email_col is not None:
-                email_soft = email_col >= 0.82
-                email_anchor = email_col >= 0.88
-                contact_support = contact_support | email_soft
-                contact_anchor = contact_anchor | email_anchor
-
-            location_core = postcode_anchor & suburb_anchor
-            relaxed_location = (
-                location_core
-                | (postcode_anchor & address_anchor)
-                | (postcode_soft & suburb_soft)
-                | (suburb_anchor & address_soft)
-            )
-
-            address_context = address_anchor | (address_soft & (suburb_soft | postcode_soft))
-
-            name_anchor = last_anchor & (first_anchor | birth_anchor | contact_anchor)
-            name_support = (last_soft & first_soft) | (last_anchor & (contact_support | relaxed_location))
-
-            keep_mask = (
-                (relaxed_location & (name_support | contact_support | address_context))
-                | (address_context & (name_support | contact_support | gender_soft))
-                | (contact_anchor & (last_soft | gender_soft | relaxed_location))
-                | (birth_anchor & (last_soft | first_soft | gender_soft | address_context))
-                | (name_anchor & (contact_support | address_context | relaxed_location))
-            )
-            if email_anchor is not None:
-                keep_mask = keep_mask | (email_anchor & (last_soft | relaxed_location | contact_support))
-            keep_mask = keep_mask | (postcode_anchor & birth_anchor & (first_soft | last_soft))
-            name_presence = last_soft | (first_anchor & (contact_anchor | relaxed_location))
-            keep_mask = keep_mask & name_presence
-        elif dataset_category == 'assignment_dirty':
-            first_soft = first_col >= 0.58
-            last_core = last_col >= 0.72
-            postcode_soft = postcode_col >= 0.83
-            suburb_soft = suburb_col >= 0.72
-            address_soft = address_col >= 0.70
-            phone_soft = phone_col >= 0.78
-            birth_soft = birth_col >= 0.90
-            gender_soft = gender_col >= 0.80
-
-            contact_support = phone_soft
-            if email_col is not None:
-                contact_support = contact_support | (email_col >= 0.83)
-            if age_col is not None:
-                contact_support = contact_support | (age_col >= 0.73)
-
-            location_support = postcode_soft | (suburb_soft & address_soft)
-            name_support = (first_col >= 0.62) & (last_col >= 0.68)
-
-            keep_mask = (
-                last_core
-                & (
-                    location_support
-                    | (contact_support & (first_soft | gender_soft))
-                    | (birth_soft & (first_soft | gender_soft))
-                    | (name_support & (location_support | contact_support))
-                )
-            )
-            keep_mask = keep_mask | (contact_support & name_support & (postcode_col >= 0.80))
-            if email_col is not None:
-                strong_email = email_col >= 0.90
-                keep_mask = keep_mask | (
-                    strong_email & (last_col >= 0.70) & (postcode_soft | suburb_soft)
-                )
         else:
-            postcode_match = postcode_col >= 0.99
-            phone_match = phone_col >= 0.85
-            birthdate_name_match = (birth_col >= 0.99) & ((first_col >= 0.70) | (last_col >= 0.80))
-            address_match = (address_col >= 0.85) & (suburb_col >= 0.95)
-            gender_aux = (gender_col >= 0.99) & (last_col >= 0.80)
-            keep_mask = postcode_match | phone_match | birthdate_name_match | address_match | gender_aux
+            candidate_pairs_gdf = _cartesian_candidate_pairs(temp_gdf_A, temp_gdf_B)
 
-        filtered = sim_vectors[keep_mask]
-        logging.info('Precision filters (%s) kept %d of %d candidate pairs (%.2f%%).',
-                     dataset_category,
-                     len(filtered), len(sim_vectors),
-                     100.0 * len(filtered) / max(1, len(sim_vectors)))
-        return filtered.reset_index(drop=True)
+        candidate_pairs_list.append(candidate_pairs_gdf)
 
-    sim_vectors_gdf = _apply_high_precision_filters(sim_vectors_gdf)
+    if not candidate_pairs_list:
+        return cudf.DataFrame({"rec_id_A": [], "rec_id_B": []})
 
-    comparison_time = time.time() - start_time
-    logging.info(f"Data comparison took {comparison_time:.3f} seconds.")
+    candidate_pairs = cudf.concat(candidate_pairs_list, ignore_index=True)
+    candidate_pairs = candidate_pairs.drop_duplicates()
 
-    # Exit if no candidate pairs were generated
-    if sim_vectors_gdf.empty:
-        logging.info("No candidate pairs were generated after blocking. Exiting.")
-        return
+    blocking_duration = time.time() - start_time
+    LOGGER.info(
+        "Generated %d candidate pairs across %d partitions in %.3f seconds.",
+        len(candidate_pairs),
+        len(common_keys),
+        blocking_duration,
+    )
+    return candidate_pairs
 
-    # -----------------------------------------------------------------------------
-    # Step 4: Classify the candidate pairs
+
+def _apply_overrides(
+    pipeline_cfg: PipelineConfig,
+    args: argparse.Namespace,
+) -> PipelineConfig:
+    """Apply CLI overrides to the loaded pipeline configuration."""
+    cfg = pipeline_cfg
+
+    if args.output:
+        output_path = os.path.normpath(os.path.expanduser(args.output))
+        cfg = replace(cfg, output_csv=output_path)
+
+    if args.use_gpu is not None and args.use_gpu != cfg.use_gpu:
+        cfg = replace(cfg, use_gpu=args.use_gpu)
+
+    if args.skip_filters and cfg.filters.enabled:
+        filters_disabled = replace(cfg.filters, enabled=False)
+        cfg = replace(cfg, filters=filters_disabled)
+
+    return cfg
+
+
+def main() -> int:
+    args = _parse_args()
+
+    if args.list_datasets:
+        dataset_keys = list_available_datasets(args.config)
+        if not dataset_keys:
+            print("No datasets found in", args.config)
+        else:
+            print("Datasets defined in", args.config)
+            for key in dataset_keys:
+                print("  -", key)
+        return 0
+
+    dataset_key = _resolve_dataset_argument(args)
+
+    try:
+        pipeline_cfg = load_pipeline_config(args.config, dataset_key=dataset_key)
+    except PipelineConfigError as exc:
+        LOGGER.error("Configuration error: %s", exc)
+        return 1
+
+    pipeline_cfg = _apply_overrides(pipeline_cfg, args)
+
+    LOGGER.info(
+        "Running dataset preset '%s' using configuration '%s'.",
+        pipeline_cfg.dataset_key,
+        os.path.abspath(args.config),
+    )
+
+    LOGGER.info("GPU comparisons %s.", "enabled" if pipeline_cfg.use_gpu else "disabled")
+    global_config.USE_GPU_COMPARISON = pipeline_cfg.use_gpu
+
+    comparison_pairs = _resolve_comparison_pairs(pipeline_cfg)
+
+    # Step 1: Load datasets
     start_time = time.time()
+    recA_gdf = loadDataset.load_data_set(
+        pipeline_cfg.dataset_a,
+        pipeline_cfg.id_column,
+        pipeline_cfg.attributes,
+    )
+    recB_gdf = loadDataset.load_data_set(
+        pipeline_cfg.dataset_b,
+        pipeline_cfg.id_column,
+        pipeline_cfg.attributes,
+    )
+    true_match_set = loadDataset.load_truth_data(pipeline_cfg.truth)
 
+    loading_time = time.time() - start_time
+    LOGGER.info("Data loading finished in %.3f seconds.", loading_time)
+
+    # Step 2: Blocking + candidate generation
+    candidate_pairs_gdf = _generate_candidate_pairs(pipeline_cfg, recA_gdf, recB_gdf)
+    if candidate_pairs_gdf.empty:
+        LOGGER.info("No candidate pairs generated; exiting.")
+        return 0
+
+    # Step 3: Compare candidate pairs
+    start_time = time.time()
+    sim_vectors_gdf = comparison.compare_pairs(
+        candidate_pairs_gdf, recA_gdf, recB_gdf, comparison_pairs
+    )
+    comparison_time = time.time() - start_time
+    LOGGER.info("Computed similarity vectors in %.3f seconds.", comparison_time)
+
+    if sim_vectors_gdf.empty:
+        LOGGER.info("No similarity vectors produced; exiting.")
+        return 0
+
+    # Step 4: Precision-focused filtering
+    sim_vectors_gdf = _apply_filter_profile(sim_vectors_gdf, pipeline_cfg.filters)
+    if sim_vectors_gdf.empty:
+        LOGGER.info("All candidate pairs filtered out; exiting.")
+        return 0
+
+    # Step 5: Classification
+    start_time = time.time()
     class_match_set, class_nonmatch_set = classification.supervisedMLClassify(
         sim_vectors_gdf,
         true_match_set,
-        threshold_offset=threshold_offset,
-        min_precision=min_precision,
-        min_recall=min_recall,
-        precision_beta=precision_beta,
+        n_estimators=pipeline_cfg.classification.n_estimators,
+        threshold=pipeline_cfg.classification.base_threshold,
+        threshold_offset=pipeline_cfg.classification.threshold_offset,
+        min_precision=pipeline_cfg.classification.min_precision,
+        min_recall=pipeline_cfg.classification.min_recall,
+        precision_beta=pipeline_cfg.classification.precision_beta,
     )
-
     classification_time = time.time() - start_time
-    logging.info(f"Data classification took {classification_time:.3f} seconds.")
+    LOGGER.info("Classification stage completed in %.3f seconds.", classification_time)
 
-    # -----------------------------------------------------------------------------
-    # Step 5: Evaluate the classification
+    # Step 6: Evaluation (requires truth data)
     num_comparisons = len(sim_vectors_gdf)
     all_comparisons = len(recA_gdf) * len(recB_gdf)
-
     evaluation.evaluate_blocking(sim_vectors_gdf, true_match_set, num_comparisons, all_comparisons)
     evaluation.evaluate_linkage(class_match_set, class_nonmatch_set, true_match_set, all_comparisons)
 
-    linkage_time = loading_time + blocking_time + comparison_time + classification_time
-    logging.info(f'Total runtime required for linkage: {linkage_time:.3f} sec')
+    total_runtime = loading_time + comparison_time + classification_time
+    LOGGER.info("Total end-to-end runtime: %.3f seconds.", total_runtime)
 
-    # -----------------------------------------------------------------------------
-    # Step 6: Save the linkage result
-    saveLinkResult.save_linkage_set('./out/data_wrangling_rl_best_results_2025_u7283652.csv', class_match_set)
+    # Step 7: Persist results
+    saveLinkResult.save_linkage_set(pipeline_cfg.output_csv, class_match_set)
+    LOGGER.info("Saved %d matched pairs to '%s'.", len(class_match_set), pipeline_cfg.output_csv)
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

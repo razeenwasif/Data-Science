@@ -14,6 +14,9 @@
 
 \maketitle
 
+\section*{Data Preprocessing}
+All three pipeline stages rely on the same light but deliberate normalization. When the assignment CSVs are ingested every column name and string value is lowercased, unused attributes are dropped, and the identifier column becomes the index so later modules see a consistent schema. Blocking and comparison reuse those normalized fields but coerce each value to string, strip surrounding whitespace, and replace missing entries with empty strings before building the TF--IDF representations or similarity scores. The classifier then fills any remaining gaps in the similarity matrix with zeros so the random forest receives dense numeric input. These quick clean-up steps keep typographical noise, nulls, and inconsistent casing from leaking into Faiss or the classifier without masking the underlying corruption patterns described in the evaluation.
+
 \section*{Task 1: Blocking (a--c)}
 I utilizied a two stage blocking design but tuned every component for the assignment dataset linkage pair. The first pass applies simple blocking on the standardised two-letter state code so that only jurisdictionally plausible pairs progress. Within each state I generate candidate pairs with a TF--IDF $q{=}2$ and Faiss search over first name, last name, street address, suburb and email. Increasing $k$ from a lower number like 25 to 35 and adding the e-mail tokens proved critical: the new files include many keyboard substitutions (``joHn'' $\rightarrow$ ``johm'') and corrupted addresses (``0'' for ``o''). Including e-mail gives the index a robust high precision anchor when the address line is severely distorted. In contrast, including phone numbers in the vector hurt recall because punctuation and spacing noise dominated the character $n$-grams. Each pass produces per-state candidate counts (NT: 637, VIC: 4005, NSW: 7029, etc.) while keeping the overall pool to 19\,346 pairs before filtering.
 
@@ -61,4 +64,3 @@ Relative to the lab datasets, the 2025 files are noticeably dirtier. About $3$--
 To quantify the quality gap I profiled each dataset with simple error signals: presence of digits in alphabetic fields, malformed dates, e-mail characters outside $[A$--$Z\!a$--$z0$--$9@.\,+-]$, and double spaces inside phone numbers. I then benchmarked the same metrics against the lab datasets where the corresponding rates are below $5\%$ for all attributes. The assignment files exceed those baselines by factors of two to ten. I also measured blocking statistics: Pairs Completeness of $0.985$ on the final configuration versus $0.998$ on the ``clean 10000'' lab set, confirming that the new data causes more true matches to fall outside simple blocks. These numerical checks, combined with manual inspection of sample mismatches, demonstrate that the assignment datasets are substantially noisier and justify the additional comparator and threshold tuning performed in Tasks~1--3.
 
 \end{document}
-

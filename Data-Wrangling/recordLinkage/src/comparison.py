@@ -13,7 +13,7 @@ from numba_kernels import (
     calculate_levenshtein_pairwise_gpu,
 )
 
-from config import USE_GPU_COMPARISON
+import config
 from numba import cuda
 from rapidfuzz.distance import Levenshtein
 
@@ -776,7 +776,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
     char_gpu_buffers = {}
     qgram_gpu_buffers = {}
 
-    if USE_GPU_COMPARISON:
+    if config.USE_GPU_COMPARISON:
         for aA, aB in gpu_attrs_char:
             colA = merged_gdf[aA + '_A'].fillna('')
             colB = merged_gdf[aB + '_B'].fillna('')
@@ -804,7 +804,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
         if comp_funct == exact_comp:
             sim_col = (col_A == col_B).astype('float32')
 
-        elif USE_GPU_COMPARISON and comp_funct in (jaccard_comp, jaccard_comp_gpu):
+        elif config.USE_GPU_COMPARISON and comp_funct in (jaccard_comp, jaccard_comp_gpu):
             try:
                 d_matA, d_matB = qgram_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_jaccard_similarity_gpu_pairwise(d_matA, d_matB)
@@ -817,7 +817,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [jaccard_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct in (dice_comp, dice_comp_gpu):
+        elif config.USE_GPU_COMPARISON and comp_funct in (dice_comp, dice_comp_gpu):
             try:
                 d_matA, d_matB = qgram_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_dice_similarity_gpu_pairwise(d_matA, d_matB)
@@ -830,7 +830,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [dice_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct in (jaro_winkler_comp, jaro_winkler_comp_gpu):
+        elif config.USE_GPU_COMPARISON and comp_funct in (jaro_winkler_comp, jaro_winkler_comp_gpu):
             try:
                 d_arrA, d_lenA, d_arrB, d_lenB = char_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_jaro_winkler_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB)
@@ -843,7 +843,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
                 sim_list = [jaro_winkler_comp(v1, v2) for v1, v2 in zip(s_A, s_B)]
                 sim_col = cudf.Series(sim_list, nan_as_null=False)
 
-        elif USE_GPU_COMPARISON and comp_funct in (edit_dist_sim_comp, levenshtein_comp_gpu):
+        elif config.USE_GPU_COMPARISON and comp_funct in (edit_dist_sim_comp, levenshtein_comp_gpu):
             try:
                 d_arrA, d_lenA, d_arrB, d_lenB = char_gpu_buffers[(attr_nameA, attr_nameB)]
                 sims = calculate_levenshtein_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB)
