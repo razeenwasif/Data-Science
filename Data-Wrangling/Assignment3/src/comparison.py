@@ -740,7 +740,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
     unique_ids_A = pairs_gdf['rec_id_A'].unique()
     unique_ids_B = pairs_gdf['rec_id_B'].unique()
 
-    # 2. Select ONLY the necessary records from the main DataFrames
+    # 2. Select only the necessary records from the main DataFrames
     chunk_recA_gdf = recA_gdf_renamed.loc[unique_ids_A]
     chunk_recB_gdf = recB_gdf_renamed.loc[unique_ids_B]
 

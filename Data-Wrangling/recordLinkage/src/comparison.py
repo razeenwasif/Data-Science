@@ -271,6 +271,17 @@ def _digits_only(val):
     return ''.join(ch for ch in str(val) if '0' <= ch <= '9')
 
 
+def _safe_int(val):
+    """Return an integer extracted from *val* or ``None`` if conversion fails."""
+    digits = _digits_only(val)
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
 def gender_comp(val1, val2):
     """Exact comparison on gender (case-insensitive first character match)."""
     if not val1 or not val2:
@@ -307,6 +318,24 @@ def phone_suffix_comp(val1, val2, min_digits=7):
     if len(d1) < min_digits or len(d2) < min_digits:
         return 0.0
     return 1.0 if d1[-min_digits:] == d2[-min_digits:] else 0.0
+
+
+def age_similarity_comp(val1, val2, max_diff=12):
+    """Compare ages by their absolute difference with a linear decay.
+
+    Returns 1.0 for identical ages, decreases linearly until ``max_diff`` years
+    apart where the score reaches 0.0. Missing or non-numeric values yield 0.0.
+    """
+    age1 = _safe_int(val1)
+    age2 = _safe_int(val2)
+    if age1 is None or age2 is None:
+        return 0.0
+    diff = abs(age1 - age2)
+    if diff == 0:
+        return 1.0
+    if diff >= max_diff:
+        return 0.0
+    return max(0.0, 1.0 - (diff / float(max_diff)))
 
 # =============================================================================
 # First the basic functions to compare attribute values
@@ -711,7 +740,7 @@ def _process_chunk(pairs_chunk, recA_gdf_renamed, recB_gdf_renamed, attr_comp_li
     unique_ids_A = pairs_gdf['rec_id_A'].unique()
     unique_ids_B = pairs_gdf['rec_id_B'].unique()
 
-    # 2. Select ONLY the necessary records from the main DataFrames
+    # 2. Select only the necessary records from the main DataFrames
     chunk_recA_gdf = recA_gdf_renamed.loc[unique_ids_A]
     chunk_recB_gdf = recB_gdf_renamed.loc[unique_ids_B]
 

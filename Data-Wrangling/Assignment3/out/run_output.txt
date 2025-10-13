@@ -19,41 +19,41 @@ Run simple blocking:
 Run simple blocking:
   List of blocking key attributes: ['state']
   Number of records to be blocked: 20000
-Running ANN candidate generation for 968 x 1032 records...
-  Generated 637 candidate pairs from ANN search.
+Running ANN candidate generation for 5910 x 6016 records...
+  Generated 7029 candidate pairs from ANN search.
+Running ANN candidate generation for 2062 x 1992 records...
+  Generated 1943 candidate pairs from ANN search.
 Running ANN candidate generation for 3977 x 4034 records...
   Generated 3810 candidate pairs from ANN search.
 Running ANN candidate generation for 1071 x 1024 records...
   Generated 653 candidate pairs from ANN search.
 Running ANN candidate generation for 4038 x 3931 records...
   Generated 4005 candidate pairs from ANN search.
-Running ANN candidate generation for 5910 x 6016 records...
-  Generated 7029 candidate pairs from ANN search.
+Running ANN candidate generation for 968 x 1032 records...
+  Generated 637 candidate pairs from ANN search.
 Running ANN candidate generation for 954 x 966 records...
   Generated 616 candidate pairs from ANN search.
-Running ANN candidate generation for 2062 x 1992 records...
-  Generated 1943 candidate pairs from ANN search.
 Running ANN candidate generation for 1020 x 1005 records...
   Generated 653 candidate pairs from ANN search.
 Comparing 19346 candidate pairs...
   Comparing attribute values for candidate pairs chunk 1 (using native cudf and custom kernels where possible)...
-    sample sim (first_name->first_name): [0.0, 0.0, 0.0, 0.0, 0.0]
-    sample sim (middle_name->middle_name): [0.0, 0.0, 0.0, 0.0, 0.0]
-    sample sim (last_name->last_name): [1.0, 1.0, 0.9357143044471741, 1.0, -0.20000000298023224]
-    sample sim (street_address->street_address): [1.0, 1.0, 0.8888888955116272, 1.0, 0.5625]
-    sample sim (suburb->suburb): [1.0, 1.0, 0.9230769276618958, 1.0, 0.0]
+    sample sim (first_name->first_name): [0.0, 0.07692307978868484, 0.0, 0.0, 0.0]
+    sample sim (middle_name->middle_name): [0.0, 0.1666666716337204, 0.0, 0.3333333432674408, 0.0]
+    sample sim (last_name->last_name): [0.9261904954910278, 0.980555534362793, 1.0, 1.0, 1.0]
+    sample sim (street_address->street_address): [0.8999999761581421, 0.8888888955116272, 1.0, 1.0, 1.0]
+    sample sim (suburb->suburb): [0.9090909361839294, 0.8571428656578064, 1.0, 1.0, 1.0]
     sample sim (state->state): [1.0, 1.0, 1.0, 1.0, 1.0]
     Processing 'gender_comp' on CPU.
-    sample sim (gender->gender): [1.0, 1.0, 1.0, 1.0, 0.0]
+    sample sim (gender->gender): [1.0, 1.0, 1.0, 1.0, 1.0]
     Processing 'date_digits_comp' on CPU.
-    sample sim (birth_date->birth_date): [1.0, 1.0, 0.0, 1.0, 0.0]
+    sample sim (birth_date->birth_date): [0.0, 0.0, 1.0, 1.0, 1.0]
     Processing 'postcode_exact_comp' on CPU.
-    sample sim (postcode->postcode): [1.0, 1.0, 0.0, 1.0, 0.0]
+    sample sim (postcode->postcode): [0.0, 0.0, 1.0, 1.0, 1.0]
     Processing 'phone_suffix_comp' on CPU.
-    sample sim (phone->phone): [1.0, 1.0, 0.0, 1.0, 0.0]
+    sample sim (phone->phone): [0.0, 0.0, 1.0, 1.0, 1.0]
     Processing 'age_similarity_comp' on CPU.
-    sample sim (current_age->current_age): [1.0, 1.0, 1.0, 1.0, 0.0]
-    sample sim (email->email): [1.0, 1.0, 0.9523809552192688, 1.0, 0.6399999856948853]
+    sample sim (current_age->current_age): [1.0, 1.0, 1.0, 1.0, 1.0]
+    sample sim (email->email): [0.9545454382896423, 0.9545454382896423, 1.0, 1.0, 1.0]
   Finished comparing 19346 record pairs
 
 Supervised random forest classification of 10324 record pairs
@@ -96,17 +96,17 @@ Supervised random forest classification of 10324 record pairs
   Classifier accuracy on sampled test set: 0.955
 
   Validation threshold search: thr=0.050 -> precision=0.955, recall=1.000, F1=0.977
-  Precision-focused validation threshold: thr=0.050 -> precision=0.955, recall=1.000, F-beta(0.25)=0.958
+  Precision-focused validation threshold: thr=0.850 -> precision=0.956, recall=0.997, F-beta(0.25)=0.958
   Predicting probabilities on 10324 pairs in 1 chunks of size 1000000...
-  Probability distribution - 50th: 0.946, 75th: 0.967, 90th: 0.982, 95th: 0.988, 99th: 0.996
-  Applied threshold offset 0.010; adjusted decision threshold to 0.935 (was 0.925).
-  Final threshold summary (min precision 0.55): thr=0.925 -> precision=0.962, recall=0.958, F1=0.961
-  Using decision threshold: 0.935 (validation precision=0.955, recall=1.000, F1=0.977; precision-focused validation precision=0.955, recall=1.000, F-beta=0.958; final precision=0.963, recall=0.930, F1=0.946; provided threshold was 0.400)
-  Threshold diagnostic: 9509 predicted matches, 9159 true positives (est. precision 0.963)
+  Probability distribution - 50th: 0.953, 75th: 0.966, 90th: 0.980, 95th: 0.987, 99th: 0.994
+  Applied threshold offset 0.010; adjusted decision threshold to 0.927 (was 0.917).
+  Final threshold summary (min precision 0.55): thr=0.917 -> precision=0.962, recall=0.958, F1=0.962
+  Using decision threshold: 0.927 (validation precision=0.955, recall=1.000, F1=0.977; precision-focused validation precision=0.956, recall=0.997, F-beta=0.958; final precision=0.964, recall=0.904, F1=0.933; provided threshold was 0.400)
+  Threshold diagnostic: 9232 predicted matches, 8900 true positives (est. precision 0.964)
 
   Cleaning up memory before final result collection...
   Collecting results in 1 chunks of size 1000000...
-  Classified 9509 record pairs as matches and 815 as non-matches
+  Classified 9232 record pairs as matches and 1092 as non-matches
 
 Blocking evaluation:
 ====================
@@ -115,13 +115,13 @@ Pairs completeness: 0.985
 Pairs quality: 0.954
 Linkage evaluation:
 ===================
-Calculating confusion matrix using 9509 classified matches, 815 classified non-matches, and 10000 true matches
-  TP=9094, FP=415, FN=906, TN=399989585
+Calculating confusion matrix using 9232 classified matches, 1092 classified non-matches, and 10000 true matches
+  TP=8920, FP=312, FN=1080, TN=399989688
 
 Accuracy: 1.000
-Precision: 0.956
-Recall: 0.909
-F-measure: 0.932
+Precision: 0.966
+Recall: 0.892
+F-measure: 0.928
 Write linkage results to file: ./out/matches.csv
-  Wrote 9509 linked record pairs
+  Wrote 9232 linked record pairs
 

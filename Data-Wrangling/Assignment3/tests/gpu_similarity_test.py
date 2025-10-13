@@ -1,4 +1,3 @@
-# --- filename: gpu_similarity_test_harness.py ---
 """
 GPU similarity test harness
 ===========================

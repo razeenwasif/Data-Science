@@ -49,36 +49,54 @@ def main():
     parser.add_argument(
         'dataset',
         nargs='?',
-        default='clean_100000',
-        help='Dataset preset to use (e.g. -clean_100000, -very-dirty_100000, clean_100000).',
+        default='assignment_datasets',
+        help='Dataset preset to use (e.g. assignment_datasets, clean_100000, very-dirty_100000).',
     )
     args = parser.parse_args()
 
     dataset_key = args.dataset.lstrip('-').lower()
     dataset_configs = {
         'clean_100000': {
-            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-A-100000.csv',
-            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-B-100000.csv',
-            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/clean-true-matches-100000.csv',
+            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-A-100000.csv',
+            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-B-100000.csv',
+            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/clean-true-matches-100000.csv',
+            'category': 'clean',
         },
         'little-dirty_100000': {
-            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-A-100000.csv',
-            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-B-100000.csv',
-            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-true-matches-100000.csv',
+            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-A-100000.csv',
+            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-B-100000.csv',
+            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/little-dirty-true-matches-100000.csv',
+            'category': 'little_dirty',
         },
         'very-dirty_100000': {
-            'datasetA_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv',
-            'datasetB_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv',
-            'truthfile_name': './datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv',
+            'datasetA_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-A-100000.csv',
+            'datasetB_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-B-100000.csv',
+            'truthfile_name': 'src/datasets/comp3430_comp8430-rl-additional-datasets/very-dirty-true-matches-100000.csv',
+            'category': 'very_dirty',
+        },
+        'assignment_datasets': {
+            'datasetA_name': 'src/datasets/data_wrangling_rl1_2025_u7283652.csv',
+            'datasetB_name': 'src/datasets/data_wrangling_rl2_2025_u7283652.csv',
+            'truthfile_name': 'src/datasets/data_wrangling_rlgt_2025_u7283652.csv',
+            'category': 'assignment_dirty',
         },
     }
     if dataset_key not in dataset_configs:
         available = ', '.join(sorted(dataset_configs.keys()))
         raise ValueError(f'Unknown dataset preset "{dataset_key}". Available options: {available}')
 
-    datasetA_name = dataset_configs[dataset_key]['datasetA_name']
-    datasetB_name = dataset_configs[dataset_key]['datasetB_name']
-    truthfile_name = dataset_configs[dataset_key]['truthfile_name']
+    dataset_config = dataset_configs[dataset_key]
+    datasetA_name = dataset_config['datasetA_name']
+    datasetB_name = dataset_config['datasetB_name']
+    truthfile_name = dataset_config['truthfile_name']
+    dataset_category = dataset_config.get('category')
+    if not dataset_category:
+        dataset_category = (
+            'clean' if 'clean-' in datasetA_name else
+            'little_dirty' if 'little-dirty-' in datasetA_name else
+            'very_dirty' if 'very-dirty-' in datasetA_name else
+            'unknown'
+        )
 
     # The list of tuples (comparison function, attribute name in record A,
     # attribute name in record B)
@@ -94,9 +112,26 @@ def main():
         (comparison.date_digits_comp, 'birth_date', 'birth_date'),
         (comparison.postcode_exact_comp, 'postcode', 'postcode'),
         (comparison.phone_suffix_comp, 'phone', 'phone'),
+        (comparison.age_similarity_comp, 'current_age', 'current_age'),
+        (comparison.levenshtein_comp_gpu, 'email', 'email'),
     ]
 
-    attr_list = ['first_name', 'middle_name', 'last_name', 'gender', 'birth_date', 'street_address', 'suburb', 'postcode', 'state', 'phone']
+    attr_list = [
+        'first_name',
+        'middle_name',
+        'last_name',
+        'gender',
+        'birth_date',
+        'street_address',
+        'suburb',
+        'postcode',
+        'state',
+        'phone',
+        'current_age',
+        'email',
+    ]
+
+    threshold_offset = 0.01 if dataset_category == 'assignment_dirty' else 0.0
 
     # =============================================================================
     # Step 1: Load the two datasets from CSV files
@@ -125,6 +160,16 @@ def main():
     logging.info('Running ANN candidate generation within each state partition...')
     ann_attrs = ['first_name', 'last_name', 'suburb']
     K_NEIGHBORS = 25
+    ann_sim_threshold = 0.50
+
+    if dataset_category in ('very_dirty', 'assignment_dirty'):
+        ann_attrs = ['first_name', 'last_name', 'street_address', 'suburb']
+        K_NEIGHBORS = 30
+        ann_sim_threshold = 0.48
+    if dataset_category == 'assignment_dirty':
+        ann_attrs = ['first_name', 'last_name', 'street_address', 'suburb', 'email']
+        K_NEIGHBORS = 35
+        ann_sim_threshold = 0.45
 
     # Get a set of common state keys to iterate over
     common_states = set(state_blocks_A.keys()) & set(state_blocks_B.keys())
@@ -140,7 +185,13 @@ def main():
         temp_gdf_B = recB_gdf.loc[rec_ids_B]
 
         # Generate candidate pairs for the partition using ANN search
-        partition_pairs_gdf = blocking.ann_candidate_generation(temp_gdf_A, temp_gdf_B, k=K_NEIGHBORS, blk_attr_list=ann_attrs)
+        partition_pairs_gdf = blocking.ann_candidate_generation(
+            temp_gdf_A,
+            temp_gdf_B,
+            k=K_NEIGHBORS,
+            blk_attr_list=ann_attrs,
+            sim_threshold=ann_sim_threshold,
+        )
         all_candidate_pairs_list.append(partition_pairs_gdf)
 
     # Combine candidate pairs from all partitions
@@ -159,13 +210,6 @@ def main():
 
     sim_vectors_gdf = comparison.compare_pairs(candidate_pairs_gdf, recA_gdf, recB_gdf, \
                                                approx_comp_funct_list)
-
-    dataset_category = (
-        'clean' if 'clean-' in datasetA_name else
-        'little_dirty' if 'little-dirty-' in datasetA_name else
-        'very_dirty' if 'very-dirty-' in datasetA_name else
-        'unknown'
-    )
 
     def _apply_high_precision_filters(sim_vectors):
         """Prune candidate pairs that lack agreement on high-signal identifiers."""
@@ -196,6 +240,8 @@ def main():
         phone_col = sim_vectors['sim_phone']
         birth_col = sim_vectors['sim_birth_date']
         gender_col = sim_vectors['sim_gender']
+        email_col = sim_vectors['sim_email'] if 'sim_email' in available_cols else None
+        age_col = sim_vectors['sim_current_age'] if 'sim_current_age' in available_cols else None
 
         if dataset_category == 'clean':
             first_good = first_col >= 0.75
@@ -251,6 +297,40 @@ def main():
                 | (birth_relaxed & last_loose & (first_loose | gender_relaxed))
                 | ((first_loose & last_loose) & (location_core | address_relaxed | phone_relaxed | birth_relaxed))
             )
+        elif dataset_category == 'assignment_dirty':
+            first_soft = first_col >= 0.58
+            last_core = last_col >= 0.72
+            postcode_soft = postcode_col >= 0.83
+            suburb_soft = suburb_col >= 0.72
+            address_soft = address_col >= 0.70
+            phone_soft = phone_col >= 0.78
+            birth_soft = birth_col >= 0.90
+            gender_soft = gender_col >= 0.80
+
+            contact_support = phone_soft
+            if email_col is not None:
+                contact_support = contact_support | (email_col >= 0.83)
+            if age_col is not None:
+                contact_support = contact_support | (age_col >= 0.73)
+
+            location_support = postcode_soft | (suburb_soft & address_soft)
+            name_support = (first_col >= 0.62) & (last_col >= 0.68)
+
+            keep_mask = (
+                last_core
+                & (
+                    location_support
+                    | (contact_support & (first_soft | gender_soft))
+                    | (birth_soft & (first_soft | gender_soft))
+                    | (name_support & (location_support | contact_support))
+                )
+            )
+            keep_mask = keep_mask | (contact_support & name_support & (postcode_col >= 0.80))
+            if email_col is not None:
+                strong_email = email_col >= 0.90
+                keep_mask = keep_mask | (
+                    strong_email & (last_col >= 0.70) & (postcode_soft | suburb_soft)
+                )
         else:
             postcode_match = postcode_col >= 0.99
             phone_match = phone_col >= 0.85
@@ -281,7 +361,7 @@ def main():
     start_time = time.time()
 
     class_match_set, class_nonmatch_set = \
-               classification.supervisedMLClassify(sim_vectors_gdf, true_match_set)
+               classification.supervisedMLClassify(sim_vectors_gdf, true_match_set, threshold_offset=threshold_offset)
 
     classification_time = time.time() - start_time
     logging.info(f"Data classification took {classification_time:.3f} seconds.")

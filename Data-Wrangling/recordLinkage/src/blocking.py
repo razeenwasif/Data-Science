@@ -420,8 +420,8 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
         center_vector = np.array([vectors_np[center_index, :]], dtype='float32')
 
         # Use knn search and filter by radius to simulate range search
-        # Set k to a reasonably large number. Capping at 2048 which is a common limit.
-        k = min(num_records, 2048)
+        # Set k to a reasonably large number. Cap at 2048.
+        k = min(num_records, 2048) #try out different numbers
         D, I = gpu_index.search(center_vector, k)
 
         # Filter results by the T1 radius (using squared distances)
@@ -509,15 +509,26 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     vectors_B_np = vectors_B.toarray().get()
 
     # Step 2: Build and train Faiss index for dataset B
-    nlist = int(np.sqrt(len(recB_gdf)))
-    quantizer = faiss.IndexFlatL2(dim)
-    index = faiss.IndexIVFFlat(quantizer, dim, nlist)
-    
+    n_samples_B = len(recB_gdf)
     res = faiss.StandardGpuResources()
-    gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
-    gpu_index.train(vectors_B_np)
-    gpu_index.add(vectors_B_np)
-    gpu_index.nprobe = 10
+    quantizer = None
+    index = None
+    flat_index = None
+
+    use_ivf = n_samples_B >= 1500
+    if use_ivf:
+        nlist = max(1, int(np.sqrt(n_samples_B)))
+        nlist = min(nlist, max(1, n_samples_B // 2))
+        quantizer = faiss.IndexFlatL2(dim)
+        index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, index)
+        gpu_index.train(vectors_B_np)
+        gpu_index.add(vectors_B_np)
+        gpu_index.nprobe = min(20, max(1, nlist))
+    else:
+        flat_index = faiss.IndexFlatL2(dim)
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, flat_index)
+        gpu_index.add(vectors_B_np)
 
     # Step 3: Search for k-nearest neighbors
     # Squared L2 distance threshold: L2_dist^2 = 2 - 2 * cos_sim
@@ -559,20 +570,22 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
     sys.stdout.flush()
 
-    # Explicitly free up GPU memory
+    # free up GPU memory
     del vectors_A, vectors_B, vectors_A_np, vectors_B_np
-    del quantizer, index, gpu_index, res
     del distances, indices
     del pairs_A, pairs_B_indices, pairs_B_indices_gpu
     del col_A, col_B
+    if use_ivf:
+        del quantizer, index
+    else:
+        del flat_index
+    del gpu_index, res
     import gc
     gc.collect()
     
     return candidate_pairs_gdf
 
 # -----------------------------------------------------------------------------
-
-
 
 def merge_block_dicts(dict1, dict2):
     """Merges two block dictionaries."""

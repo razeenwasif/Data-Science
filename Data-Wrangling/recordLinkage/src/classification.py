@@ -390,7 +390,7 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, threshold=0.4):
+def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, threshold=0.4, threshold_offset=0.0):
     """Classify candidate pairs using a GPU-backed random forest classifier.
 
     The training data is constructed from the supplied similarity vectors,
@@ -410,6 +410,9 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
         Number of trees in the random forest ensemble.
     threshold : float, optional
         Baseline probability threshold used during the hyper-parameter sweep.
+    threshold_offset : float, optional
+        Value added to the selected decision threshold prior to classification.
+        Negative offsets relax the threshold (potentially boosting recall).
 
     Returns
     -------
@@ -658,6 +661,29 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
             '  Global search failed to meet precision/recall floor; using validation threshold instead.'
         )
 
+    decision_threshold = max(0.05, min(0.99, global_threshold + threshold_offset))
+    if not np.isclose(decision_threshold, global_threshold):
+        print(
+            '  Applied threshold offset %.3f; adjusted decision threshold to %.3f (was %.3f).'
+            % (threshold_offset, decision_threshold, global_threshold)
+        )
+
+        decision_preds = probas_np >= decision_threshold
+        positives_total = np.count_nonzero(y_all_np == 1)
+        tp_decision = np.count_nonzero(decision_preds & (y_all_np == 1))
+        fp_decision = np.count_nonzero(decision_preds) - tp_decision
+        fn_decision = positives_total - tp_decision
+        decision_precision = tp_decision / (tp_decision + fp_decision) if (tp_decision + fp_decision) > 0 else 0.0
+        decision_recall = tp_decision / (tp_decision + fn_decision) if (tp_decision + fn_decision) > 0 else 0.0
+        if decision_precision == 0.0 and decision_recall == 0.0:
+            decision_f1 = 0.0
+        else:
+            decision_f1 = 2.0 * decision_precision * decision_recall / (decision_precision + decision_recall)
+    else:
+        decision_precision = global_precision
+        decision_recall = global_recall
+        decision_f1 = global_f1
+
     print(
         '  Final threshold summary (min precision %.2f): thr=%.3f -> precision=%.3f, recall=%.3f, F1=%.3f'
         % (GLOBAL_MIN_PRECISION, global_threshold, global_precision, global_recall, global_f1)
@@ -667,20 +693,20 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
         'precision-focused validation precision=%.3f, recall=%.3f, F-beta=%.3f; '
         'final precision=%.3f, recall=%.3f, F1=%.3f; provided threshold was %.3f)'
         % (
-            global_threshold,
+            decision_threshold,
             best_precision,
             best_recall,
             best_f1,
             precision_val_prec,
             precision_val_rec,
             precision_val_fbeta,
-            global_precision,
-            global_recall,
-            global_f1,
+            decision_precision,
+            decision_recall,
+            decision_f1,
             threshold,
         )
     )
-    predicted_mask = probas_np >= global_threshold
+    predicted_mask = probas_np >= decision_threshold
     predicted_positive = int(predicted_mask.sum())
     true_positive = int(np.count_nonzero(predicted_mask & (y_all_np == 1)))
     est_precision = (true_positive / predicted_positive) if predicted_positive else 0.0
@@ -689,8 +715,6 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
     )
     print('')
     sys.stdout.flush()
-
-    decision_threshold = global_threshold
 
     # Second pass: apply threshold to get predictions
     predictions = (probas_all >= decision_threshold).astype('int32')

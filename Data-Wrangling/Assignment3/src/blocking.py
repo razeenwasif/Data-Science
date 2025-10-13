@@ -420,8 +420,8 @@ def canopy_clustering(gdf, blk_attr_list, T1, T2):
         center_vector = np.array([vectors_np[center_index, :]], dtype='float32')
 
         # Use knn search and filter by radius to simulate range search
-        # Set k to a reasonably large number. Capping at 2048 which is a common limit.
-        k = min(num_records, 2048)
+        # Set k to a reasonably large number. Cap at 2048.
+        k = min(num_records, 2048) #try out different numbers
         D, I = gpu_index.search(center_vector, k)
 
         # Filter results by the T1 radius (using squared distances)
@@ -570,7 +570,7 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     print(f"  Generated {len(candidate_pairs_gdf)} candidate pairs from ANN search.")
     sys.stdout.flush()
 
-    # Explicitly free up GPU memory
+    # free up GPU memory
     del vectors_A, vectors_B, vectors_A_np, vectors_B_np
     del distances, indices
     del pairs_A, pairs_B_indices, pairs_B_indices_gpu
@@ -586,8 +586,6 @@ def ann_candidate_generation(recA_gdf, recB_gdf, k, blk_attr_list, sim_threshold
     return candidate_pairs_gdf
 
 # -----------------------------------------------------------------------------
-
-
 
 def merge_block_dicts(dict1, dict2):
     """Merges two block dictionaries."""

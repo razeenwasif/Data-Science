@@ -1,9 +1,9 @@
-# === Add this near the end of numba_kernels.py ===
 import numpy as np
 from numba import cuda
 
 @cuda.jit
 def _jaro_winkler_kernel(arr1, len1, arr2, len2, out, max_len):
+    """Compute Jaro-Winkler similarity for each string pair in arr1/arr2."""
     i = cuda.grid(1)
     if i >= arr1.shape[0]:
         return
@@ -43,6 +43,7 @@ def _jaro_winkler_kernel(arr1, len1, arr2, len2, out, max_len):
 
 @cuda.jit
 def _levenshtein_kernel(arr1, len1, arr2, len2, out, max_len):
+    """Compute normalized Levenshtein similarity for each string pair."""
     i = cuda.grid(1)
     if i >= arr1.shape[0]:
         return
@@ -79,6 +80,7 @@ def _levenshtein_kernel(arr1, len1, arr2, len2, out, max_len):
 
 
 def calculate_jaro_winkler_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB):
+    """Launch `_jaro_winkler_kernel` and return host similarities."""
     n = d_arrA.shape[0]
     out = cuda.device_array(n, dtype=np.float32)
     threadsperblock = 128
@@ -90,6 +92,7 @@ def calculate_jaro_winkler_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB):
 
 
 def calculate_levenshtein_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB):
+    """Launch `_levenshtein_kernel` and return host similarities."""
     n = d_arrA.shape[0]
     out = cuda.device_array(n, dtype=np.float32)
     threadsperblock = 128
@@ -101,7 +104,7 @@ def calculate_levenshtein_pairwise_gpu(d_arrA, d_lenA, d_arrB, d_lenB):
 
 @cuda.jit(device=True)
 def _popcount32(x):
-    """Counts bits set in a 32-bit integer (works on all GPUs)."""
+    """Return number of set bits in a 32-bit integer."""
     count = 0
     while x:
         x &= x - 1
@@ -110,6 +113,7 @@ def _popcount32(x):
 
 @cuda.jit
 def _dice_kernel_bitpacked(matA, matB, out):
+    """Compute Dice similarity for each row pair of bit-packed matrices."""
     i = cuda.grid(1)
     if i >= matA.shape[0]:
         return
@@ -135,6 +139,7 @@ def _dice_kernel_bitpacked(matA, matB, out):
 
 @cuda.jit
 def _jaccard_kernel_bitpacked(matA, matB, out):
+    """Compute Jaccard similarity for each row pair of bit-packed matrices."""
     i = cuda.grid(1)
     if i >= matA.shape[0]:
         return
@@ -153,6 +158,7 @@ def _jaccard_kernel_bitpacked(matA, matB, out):
 
 
 def calculate_dice_similarity_gpu_pairwise(d_matA, d_matB):
+    """Run `_dice_kernel_bitpacked` over one-to-one row pairs."""
     n = d_matA.shape[0]
     out = cuda.device_array(n, dtype=np.float32)
     threadsperblock = 128
@@ -163,6 +169,7 @@ def calculate_dice_similarity_gpu_pairwise(d_matA, d_matB):
 
 
 def calculate_jaccard_similarity_gpu_pairwise(d_matA, d_matB):
+    """Run `_jaccard_kernel_bitpacked` over one-to-one row pairs."""
     n = d_matA.shape[0]
     out = cuda.device_array(n, dtype=np.float32)
     threadsperblock = 128
@@ -174,6 +181,8 @@ def calculate_jaccard_similarity_gpu_pairwise(d_matA, d_matB):
 @cuda.jit
 def _allpairs_dice_bitpacked(matA, matB, out):
     """
+    Populate `out` with Dice similarity for every combination of rows.
+
     matA: (n, W) uint32
     matB: (m, W) uint32
     out:  (n, m) float32  (device array slice)
@@ -205,6 +214,7 @@ def _allpairs_dice_bitpacked(matA, matB, out):
 
 @cuda.jit
 def _allpairs_jaccard_bitpacked(matA, matB, out):
+    """Populate `out` with Jaccard similarity for every combination of rows."""
     i, j = cuda.grid(2)
     n = matA.shape[0]
     m = matB.shape[0]
@@ -225,13 +235,7 @@ def _allpairs_jaccard_bitpacked(matA, matB, out):
 
 
 def calculate_allpairs_dice_gpu(d_matA, d_matB, batch_m=1024, threads=(16, 16)):
-    """
-    Compute full NxM Dice similarity in batches over B.
-    d_matA: device array (n, W) uint32
-    d_matB: device array (m, W) uint32
-    batch_m: number of B rows per batch (tweak for memory)
-    returns: host numpy float32 array shape (n, m)
-    """
+    """Compute full Dice matrix via batched `_allpairs_dice_bitpacked` launches."""
     n = int(d_matA.shape[0])
     m = int(d_matB.shape[0])
     out_full = np.zeros((n, m), dtype=np.float32)
@@ -253,6 +257,7 @@ def calculate_allpairs_dice_gpu(d_matA, d_matB, batch_m=1024, threads=(16, 16)):
 
 
 def calculate_allpairs_jaccard_gpu(d_matA, d_matB, batch_m=1024, threads=(16, 16)):
+    """Compute full Jaccard matrix via batched `_allpairs_jaccard_bitpacked`."""
     n = int(d_matA.shape[0])
     m = int(d_matB.shape[0])
     out_full = np.zeros((n, m), dtype=np.float32)
