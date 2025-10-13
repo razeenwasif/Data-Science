@@ -390,7 +390,16 @@ def weightedSimilarityClassify(sim_vec_dict, weight_vec, sim_thres):
 
 # -----------------------------------------------------------------------------
 
-def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, threshold=0.4, threshold_offset=0.0):
+def supervisedMLClassify(
+    sim_vectors_gdf,
+    true_match_set,
+    n_estimators=10,
+    threshold=0.4,
+    threshold_offset=0.0,
+    min_precision=GLOBAL_MIN_PRECISION,
+    min_recall=GLOBAL_MIN_RECALL,
+    precision_beta=PRECISION_FOCUSED_BETA,
+):
     """Classify candidate pairs using a GPU-backed random forest classifier.
 
     The training data is constructed from the supplied similarity vectors,
@@ -461,6 +470,10 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
         % (ratio_candidates, [d if d is not None else 'None' for d in depth_candidates])
     )
     sys.stdout.flush()
+
+    global_min_precision = max(0.0, min(1.0, float(min_precision)))
+    global_min_recall = max(0.0, min(1.0, float(min_recall)))
+    precision_focus_beta = max(0.01, float(precision_beta))
 
     best_search = {
         'f1': -1.0,
@@ -595,7 +608,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
     sys.stdout.flush()
 
     precision_val_threshold, precision_val_prec, precision_val_rec, precision_val_fbeta = _select_threshold_for_fbeta(
-        test_probas_np, y_test_np, best_threshold, beta=PRECISION_FOCUSED_BETA, min_precision=GLOBAL_MIN_PRECISION
+        test_probas_np, y_test_np, best_threshold, beta=precision_focus_beta, min_precision=global_min_precision
     )
     print(
         '  Precision-focused validation threshold: thr=%.3f -> precision=%.3f, recall=%.3f, F-beta(%.2f)=%.3f'
@@ -603,7 +616,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
             precision_val_threshold,
             precision_val_prec,
             precision_val_rec,
-            PRECISION_FOCUSED_BETA,
+            precision_focus_beta,
             precision_val_fbeta,
         )
     )
@@ -641,12 +654,12 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
         probas_np,
         y_all_np,
         precision_val_threshold,
-        beta=PRECISION_FOCUSED_BETA,
-        min_precision=GLOBAL_MIN_PRECISION,
+        beta=precision_focus_beta,
+        min_precision=global_min_precision,
     )
     if (
-        (global_precision < GLOBAL_MIN_PRECISION or global_recall < GLOBAL_MIN_RECALL)
-        and precision_val_prec >= GLOBAL_MIN_PRECISION
+        (global_precision < global_min_precision or global_recall < global_min_recall)
+        and precision_val_prec >= global_min_precision
     ):
         # Fall back to the validation threshold if global search cannot meet the precision floor
         global_threshold = precision_val_threshold
@@ -686,7 +699,7 @@ def supervisedMLClassify(sim_vectors_gdf, true_match_set, n_estimators=10, thres
 
     print(
         '  Final threshold summary (min precision %.2f): thr=%.3f -> precision=%.3f, recall=%.3f, F1=%.3f'
-        % (GLOBAL_MIN_PRECISION, global_threshold, global_precision, global_recall, global_f1)
+        % (global_min_precision, global_threshold, global_precision, global_recall, global_f1)
     )
     print(
         '  Using decision threshold: %.3f (validation precision=%.3f, recall=%.3f, F1=%.3f; '

@@ -132,6 +132,15 @@ def main():
     ]
 
     threshold_offset = 0.01 if dataset_category == 'assignment_dirty' else 0.0
+    min_precision = classification.GLOBAL_MIN_PRECISION
+    min_recall = classification.GLOBAL_MIN_RECALL
+    precision_beta = classification.PRECISION_FOCUSED_BETA
+
+    if dataset_category == 'very_dirty':
+        threshold_offset = -0.02
+        min_precision = 0.45
+        min_recall = 0.10
+        precision_beta = 1.0
 
     # =============================================================================
     # Step 1: Load the two datasets from CSV files
@@ -279,24 +288,60 @@ def main():
             )
 
         elif dataset_category == 'very_dirty':
-            first_loose = first_col >= 0.65
-            last_loose = last_col >= 0.75
-            postcode_relaxed = postcode_col >= 0.90
-            suburb_relaxed = suburb_col >= 0.85
-            address_relaxed = address_col >= 0.78
-            phone_relaxed = phone_col >= 0.80
-            birth_relaxed = birth_col >= 0.93
-            gender_relaxed = gender_col >= 0.90
+            first_anchor = first_col >= 0.62
+            first_soft = first_col >= 0.55
+            last_anchor = last_col >= 0.72
+            last_soft = last_col >= 0.65
 
-            location_core = postcode_relaxed & suburb_relaxed
+            postcode_anchor = postcode_col >= 0.90
+            postcode_soft = postcode_col >= 0.84
+            suburb_anchor = suburb_col >= 0.82
+            suburb_soft = suburb_col >= 0.74
+            address_anchor = address_col >= 0.75
+            address_soft = address_col >= 0.68
+
+            phone_anchor = phone_col >= 0.78
+            phone_soft = phone_col >= 0.72
+            birth_anchor = birth_col >= 0.90
+            birth_soft = birth_col >= 0.86
+            gender_soft = gender_col >= 0.80
+
+            contact_support = phone_soft | birth_soft
+            contact_anchor = phone_anchor | birth_anchor
+
+            email_soft = None
+            email_anchor = None
+            if email_col is not None:
+                email_soft = email_col >= 0.82
+                email_anchor = email_col >= 0.88
+                contact_support = contact_support | email_soft
+                contact_anchor = contact_anchor | email_anchor
+
+            location_core = postcode_anchor & suburb_anchor
+            relaxed_location = (
+                location_core
+                | (postcode_anchor & address_anchor)
+                | (postcode_soft & suburb_soft)
+                | (suburb_anchor & address_soft)
+            )
+
+            address_context = address_anchor | (address_soft & (suburb_soft | postcode_soft))
+
+            name_anchor = last_anchor & (first_anchor | birth_anchor | contact_anchor)
+            name_support = (last_soft & first_soft) | (last_anchor & (contact_support | relaxed_location))
 
             keep_mask = (
-                (location_core & (address_relaxed | phone_relaxed | birth_relaxed | (first_loose & last_loose)))
-                | (address_relaxed & suburb_relaxed & (phone_relaxed | birth_relaxed | last_loose))
-                | (phone_relaxed & last_loose & (first_loose | gender_relaxed | location_core))
-                | (birth_relaxed & last_loose & (first_loose | gender_relaxed))
-                | ((first_loose & last_loose) & (location_core | address_relaxed | phone_relaxed | birth_relaxed))
+                (relaxed_location & (name_support | contact_support | address_context))
+                | (address_context & (name_support | contact_support | gender_soft))
+                | (contact_anchor & (last_soft | gender_soft | relaxed_location))
+                | (birth_anchor & (last_soft | first_soft | gender_soft | address_context))
+                | (name_anchor & (contact_support | address_context | relaxed_location))
             )
+            if email_anchor is not None:
+                keep_mask = keep_mask | (email_anchor & (last_soft | relaxed_location | contact_support))
+            keep_mask = keep_mask | (postcode_anchor & birth_anchor & (first_soft | last_soft))
+            name_presence = last_soft | (first_anchor & (contact_anchor | relaxed_location))
+            keep_mask = keep_mask & name_presence
         elif dataset_category == 'assignment_dirty':
             first_soft = first_col >= 0.58
             last_core = last_col >= 0.72
@@ -360,8 +405,14 @@ def main():
     # Step 4: Classify the candidate pairs
     start_time = time.time()
 
-    class_match_set, class_nonmatch_set = \
-               classification.supervisedMLClassify(sim_vectors_gdf, true_match_set, threshold_offset=threshold_offset)
+    class_match_set, class_nonmatch_set = classification.supervisedMLClassify(
+        sim_vectors_gdf,
+        true_match_set,
+        threshold_offset=threshold_offset,
+        min_precision=min_precision,
+        min_recall=min_recall,
+        precision_beta=precision_beta,
+    )
 
     classification_time = time.time() - start_time
     logging.info(f"Data classification took {classification_time:.3f} seconds.")
@@ -379,7 +430,7 @@ def main():
 
     # -----------------------------------------------------------------------------
     # Step 6: Save the linkage result
-    saveLinkResult.save_linkage_set('./out/matches.csv', class_match_set)
+    saveLinkResult.save_linkage_set('./out/data_wrangling_rl_best_results_2025_u7283652.csv', class_match_set)
 
 if __name__ == "__main__":
     main()
