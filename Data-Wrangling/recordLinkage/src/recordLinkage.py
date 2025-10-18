@@ -14,6 +14,8 @@ dataset presets, adjust blocking/ANN parameters, configure comparison functions,
 and tune classification thresholds without modifying code.
 """
 
+# conda activate rapids-rl 
+
 from __future__ import annotations
 
 import argparse
@@ -56,8 +58,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--config",
-        default="config/pipeline.toml",
-        help="Path to the pipeline configuration file (default: config/pipeline.toml).",
+        default="../config/pipeline.toml",
+        help="Path to the pipeline configuration file (default: ../config/pipeline.toml).",
     )
     parser.add_argument(
         "--dataset",

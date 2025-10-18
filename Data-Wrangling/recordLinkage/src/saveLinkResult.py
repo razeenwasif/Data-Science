@@ -5,6 +5,7 @@
 # Import necessary modules
 
 import csv
+import os
 
 # -----------------------------------------------------------------------------
 
@@ -18,6 +19,10 @@ def save_linkage_set(file_name, class_match_set):
                          identifiers) 
   """
   print('Write linkage results to file: ' + file_name)
+  
+  # Create the directory if it does not exist
+  os.makedirs(os.path.dirname(file_name), exist_ok=True)
+
   with open(file_name, 'w') as csv_file:  # Open a CSV file for writing
     csv_writer = csv.writer(csv_file)
     for (rec_id1, rec_id2) in sorted(class_match_set):  # Sort for nicer output
